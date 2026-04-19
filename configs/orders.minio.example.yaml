@@ -1,0 +1,39 @@
+pipeline_id: orders-landing-local
+run_timeout: 30m
+
+source:
+  type: kafka
+
+sink:
+  type: minio
+
+kafka:
+  brokers:
+    - localhost:19092
+  topic: orders
+  consumer_group: orders-landing-batch-local
+  client_id: landing-connector-local
+  commit_interval: 0s
+  security:
+    sasl_enabled: false
+    tls_enabled: false
+
+batch:
+  max_records: 10000
+  max_bytes: 67108864
+  max_duration: 5m
+
+minio:
+  endpoint: localhost:9000
+  access_key: minioadmin
+  secret_key: minioadmin
+  bucket: landing
+  base_path: source=kafka/topic=orders
+  use_ssl: false
+  force_path_style: true
+
+output:
+  parquet_compression: zstd
+  include_headers: true
+  include_key: true
+  file_prefix: part

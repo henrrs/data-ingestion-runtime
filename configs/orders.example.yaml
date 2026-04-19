@@ -1,0 +1,38 @@
+pipeline_id: orders-landing
+run_timeout: 2h
+
+source:
+  type: kafka
+
+sink:
+  type: adls
+
+kafka:
+  brokers:
+    - kafka-1:9092
+    - kafka-2:9092
+  topic: orders
+  consumer_group: orders-landing-batch
+  client_id: landing-connector
+  commit_interval: 0s
+  security:
+    sasl_enabled: false
+    tls_enabled: false
+
+batch:
+  max_records: 500000
+  max_bytes: 268435456
+  max_duration: 15m
+
+adls:
+  account_name: mystorageaccount
+  filesystem: landing
+  base_path: source=kafka/topic=orders
+  credential:
+    mode: default_azure_credential
+
+output:
+  parquet_compression: zstd
+  include_headers: true
+  include_key: true
+  file_prefix: part

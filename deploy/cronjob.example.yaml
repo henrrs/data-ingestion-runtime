@@ -1,0 +1,30 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: landing-connector-orders
+spec:
+  schedule: "0 */3 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 7200
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: landing-connector
+              image: ghcr.io/example/landing-connector:latest
+              args:
+                - -config
+                - /etc/landing-connector/orders.yaml
+              volumeMounts:
+                - name: config
+                  mountPath: /etc/landing-connector
+                  readOnly: true
+          volumes:
+            - name: config
+              configMap:
+                name: landing-connector-orders

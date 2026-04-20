@@ -21,11 +21,12 @@ Usaremos tres niveis de documentacao:
 
 ## Indice
 
-- [system-overview.md](C:\Users\henrr\Documents\Codex\2026-04-19-o-que-eu-posso-fazer-com\docs\architecture\system-overview.md)
-- [decisions/0001-hexagonal-architecture.md](C:\Users\henrr\Documents\Codex\2026-04-19-o-que-eu-posso-fazer-com\docs\architecture\decisions\0001-hexagonal-architecture.md)
-- [decisions/0002-landing-parquet-raw-payload.md](C:\Users\henrr\Documents\Codex\2026-04-19-o-que-eu-posso-fazer-com\docs\architecture\decisions\0002-landing-parquet-raw-payload.md)
-- [decisions/0003-batch-scale-to-zero.md](C:\Users\henrr\Documents\Codex\2026-04-19-o-que-eu-posso-fazer-com\docs\architecture\decisions\0003-batch-scale-to-zero.md)
-- [extension-guide.md](C:\Users\henrr\Documents\Codex\2026-04-19-o-que-eu-posso-fazer-com\docs\architecture\extension-guide.md)
+- [system-overview.md](system-overview.md)
+- [performance-analysis.md](performance-analysis.md)
+- [decisions/0001-hexagonal-architecture.md](decisions/0001-hexagonal-architecture.md)
+- [decisions/0002-landing-parquet-raw-payload.md](decisions/0002-landing-parquet-raw-payload.md)
+- [decisions/0003-batch-scale-to-zero.md](decisions/0003-batch-scale-to-zero.md)
+- [extension-guide.md](extension-guide.md)
 
 ## Regra de atualizacao
 

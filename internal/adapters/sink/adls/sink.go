@@ -9,8 +9,8 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azdatalake/file"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azdatalake/filesystem"
-	"github.com/parquet-go/parquet-go"
 
+	"landing-connector/internal/adapters/sink/parquetutil"
 	"landing-connector/internal/adapters/sink/pathing"
 	"landing-connector/internal/config"
 	"landing-connector/internal/model"
@@ -45,8 +45,8 @@ func (s *Sink) WriteWindow(ctx context.Context, window model.BatchWindow) (strin
 	}
 
 	var buffer bytes.Buffer
-	if err := parquet.Write(&buffer, window.Records); err != nil {
-		return "", fmt.Errorf("write parquet rows: %w", err)
+	if err := parquetutil.WriteRecords(&buffer, window.Records, s.cfg.Output.ParquetCompression); err != nil {
+		return "", err
 	}
 
 	filePath := pathing.BuildFilePath(s.cfg.ADLS.BasePath, pathing.FilePrefix(s.cfg), window)

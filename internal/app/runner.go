@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -18,6 +19,8 @@ type Runner struct {
 	source core.Source
 	sink   core.Sink
 }
+
+const idlePollTimeout = 2 * time.Second
 
 func NewRunner(cfg config.Config, logger *zap.Logger) (*Runner, error) {
 	source, err := core.BuildSource(cfg)
@@ -42,7 +45,7 @@ func NewRunner(cfg config.Config, logger *zap.Logger) (*Runner, error) {
 func (r *Runner) Run(ctx context.Context) error {
 	defer func() { _ = r.source.Close() }()
 
-	runID := time.Now().UTC().Format("20060102T150405Z")
+	runID := time.Now().UTC().Format("20060102T150405.000000000Z")
 	r.logger.Info("pipeline started",
 		zap.String("pipeline_id", r.cfg.PipelineID),
 		zap.String("run_id", runID),
@@ -56,8 +59,13 @@ func (r *Runner) Run(ctx context.Context) error {
 			return err
 		}
 
-		messages, err := r.source.Poll(ctx, 1000)
+		pollCtx, cancel := context.WithTimeout(ctx, idlePollTimeout)
+		messages, err := r.source.Poll(pollCtx, 1000)
+		cancel()
 		if err != nil {
+			if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+				break
+			}
 			return fmt.Errorf("poll kafka: %w", err)
 		}
 

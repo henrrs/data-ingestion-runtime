@@ -31,10 +31,12 @@ landing-connector.exe -config .\configs\orders.yaml
 
 ## Configuracao
 
-Veja o exemplo em [configs/orders.example.yaml](C:\Users\henrr\Documents\Codex\2026-04-19-o-que-eu-posso-fazer-com\configs\orders.example.yaml).
-Para teste local com MinIO, veja [configs/orders.minio.example.yaml](C:\Users\henrr\Documents\Codex\2026-04-19-o-que-eu-posso-fazer-com\configs\orders.minio.example.yaml).
-Para ambiente local de integracao, veja [deploy/docker-compose.local.yml](C:\Users\henrr\Documents\Codex\2026-04-19-o-que-eu-posso-fazer-com\deploy\docker-compose.local.yml).
+Veja o exemplo em [configs/orders.example.yaml](configs/orders.example.yaml).
+Para teste local com MinIO, veja [configs/orders.minio.example.yaml](configs/orders.minio.example.yaml).
+Para ambiente local de integracao, veja [deploy/docker-compose.local.yml](deploy/docker-compose.local.yml).
+Ao subir o ambiente local, o Redpanda Console fica em `http://localhost:8080` e o MinIO Console em `http://localhost:9001`.
 
 ## Arquitetura
 
-As decisoes arquiteturais ficam documentadas em [docs/architecture/README.md](C:\Users\henrr\Documents\Codex\2026-04-19-o-que-eu-posso-fazer-com\docs\architecture\README.md).
+As decisoes arquiteturais ficam documentadas em [docs/architecture/README.md](docs/architecture/README.md).
+O baseline mais recente de performance fica em [docs/architecture/performance-analysis.md](docs/architecture/performance-analysis.md).

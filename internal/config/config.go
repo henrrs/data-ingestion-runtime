@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -30,12 +31,12 @@ type SinkConfig struct {
 }
 
 type KafkaConfig struct {
-	Brokers        []string       `yaml:"brokers"`
-	Topic          string         `yaml:"topic"`
-	ConsumerGroup  string         `yaml:"consumer_group"`
-	ClientID       string         `yaml:"client_id"`
+	Brokers        []string      `yaml:"brokers"`
+	Topic          string        `yaml:"topic"`
+	ConsumerGroup  string        `yaml:"consumer_group"`
+	ClientID       string        `yaml:"client_id"`
 	CommitInterval time.Duration `yaml:"commit_interval"`
-	Security       KafkaSecurity  `yaml:"security"`
+	Security       KafkaSecurity `yaml:"security"`
 }
 
 type KafkaSecurity struct {
@@ -119,6 +120,12 @@ func (c *Config) applyDefaults() {
 	if c.ADLS.Credential.Mode == "" {
 		c.ADLS.Credential.Mode = "default_azure_credential"
 	}
+
+	c.Source.Type = strings.ToLower(c.Source.Type)
+	c.Sink.Type = strings.ToLower(c.Sink.Type)
+	c.Output.ParquetCompression = strings.ToLower(c.Output.ParquetCompression)
+	c.ADLS.Credential.Mode = strings.ToLower(c.ADLS.Credential.Mode)
+	c.Kafka.Security.Mechanism = strings.ToUpper(c.Kafka.Security.Mechanism)
 }
 
 func (c Config) Validate() error {
@@ -135,12 +142,20 @@ func (c Config) Validate() error {
 		return errors.New("kafka.topic is required")
 	case c.Kafka.ConsumerGroup == "":
 		return errors.New("kafka.consumer_group is required")
+	case c.Kafka.CommitInterval != 0:
+		return errors.New("kafka.commit_interval must be 0 because offsets are committed only after sink write confirmation")
 	case c.Batch.MaxRecords <= 0:
 		return errors.New("batch.max_records must be > 0")
 	case c.Batch.MaxBytes <= 0:
 		return errors.New("batch.max_bytes must be > 0")
 	case c.Batch.MaxDuration <= 0:
 		return errors.New("batch.max_duration must be > 0")
+	}
+
+	switch c.Output.ParquetCompression {
+	case "uncompressed", "snappy", "gzip", "brotli", "lz4", "zstd":
+	default:
+		return fmt.Errorf("unsupported output.parquet_compression: %s", c.Output.ParquetCompression)
 	}
 
 	switch c.Source.Type {

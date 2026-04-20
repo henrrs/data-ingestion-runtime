@@ -61,7 +61,7 @@ func (s *Source) Close() error {
 func (s *Source) Poll(ctx context.Context, limit int) ([]model.KafkaMessage, error) {
 	fetches := s.client.PollRecords(ctx, limit)
 	if errs := fetches.Errors(); len(errs) > 0 {
-		return nil, errs[0]
+		return nil, fmt.Errorf("fetch topic %s partition %d: %w", errs[0].Topic, errs[0].Partition, errs[0].Err)
 	}
 
 	messages := make([]model.KafkaMessage, 0, limit)

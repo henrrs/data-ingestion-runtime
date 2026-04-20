@@ -7,8 +7,8 @@ import (
 
 	minio "github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
-	"github.com/parquet-go/parquet-go"
 
+	"landing-connector/internal/adapters/sink/parquetutil"
 	"landing-connector/internal/adapters/sink/pathing"
 	"landing-connector/internal/config"
 	"landing-connector/internal/model"
@@ -20,11 +20,16 @@ type Sink struct {
 }
 
 func New(ctx context.Context, cfg config.Config) (*Sink, error) {
-	client, err := minio.New(cfg.MinIO.Endpoint, &minio.Options{
+	options := &minio.Options{
 		Creds:  credentials.NewStaticV4(cfg.MinIO.AccessKey, cfg.MinIO.SecretKey, ""),
 		Secure: cfg.MinIO.UseSSL,
 		Region: "us-east-1",
-	})
+	}
+	if cfg.MinIO.ForcePathStyle {
+		options.BucketLookup = minio.BucketLookupPath
+	}
+
+	client, err := minio.New(cfg.MinIO.Endpoint, options)
 	if err != nil {
 		return nil, fmt.Errorf("create minio client: %w", err)
 	}
@@ -51,8 +56,8 @@ func (s *Sink) WriteWindow(ctx context.Context, window model.BatchWindow) (strin
 	}
 
 	var buffer bytes.Buffer
-	if err := parquet.Write(&buffer, window.Records); err != nil {
-		return "", fmt.Errorf("write parquet rows: %w", err)
+	if err := parquetutil.WriteRecords(&buffer, window.Records, s.cfg.Output.ParquetCompression); err != nil {
+		return "", err
 	}
 
 	objectPath := pathing.BuildFilePath(s.cfg.MinIO.BasePath, pathing.FilePrefix(s.cfg), window)

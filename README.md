@@ -40,3 +40,5 @@ Ao subir o ambiente local, o Redpanda Console fica em `http://localhost:8080` e 
 
 As decisoes arquiteturais ficam documentadas em [docs/architecture/README.md](docs/architecture/README.md).
 O baseline mais recente de performance fica em [docs/architecture/performance-analysis.md](docs/architecture/performance-analysis.md).
+O plano de implementacao das otimizacoes fica em [docs/architecture/implementation-plan-performance.md](docs/architecture/implementation-plan-performance.md).
+Para rodar comparativos locais de compressao, use [scripts/bench/run-local-compression-matrix.sh](scripts/bench/run-local-compression-matrix.sh).

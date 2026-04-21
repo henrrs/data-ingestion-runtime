@@ -14,7 +14,7 @@ Usar:
 
 - Parquet como formato fisico
 - compressao ZSTD
-- payload bruto preservado em `payload_json`
+- payload bruto preservado em `payload_raw`
 - colunas tecnicas do Kafka para rastreabilidade
 
 ## Consequencias

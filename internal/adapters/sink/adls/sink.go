@@ -1,9 +1,9 @@
 package adls
 
 import (
-	"bytes"
 	"context"
 	"fmt"
+	"os"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
@@ -44,17 +44,22 @@ func (s *Sink) WriteWindow(ctx context.Context, window model.BatchWindow) (strin
 		return "", nil
 	}
 
-	var buffer bytes.Buffer
-	if err := parquetutil.WriteRecords(&buffer, window.Records, s.cfg.Output.ParquetCompression); err != nil {
-		return "", err
-	}
-
 	filePath := pathing.BuildFilePath(s.cfg.ADLS.BasePath, pathing.FilePrefix(s.cfg), window)
 	fileClient := s.fsClient.NewFileClient(filePath)
 	if _, err := fileClient.Create(ctx, nil); err != nil {
 		return "", fmt.Errorf("create adls file %s: %w", filePath, err)
 	}
-	if err := uploadFile(ctx, fileClient, buffer.Bytes()); err != nil {
+
+	tempFile, _, err := parquetutil.WriteRecordsToTempFile(window.Records, s.cfg.Output.ParquetCompression)
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		_ = tempFile.Close()
+		_ = os.Remove(tempFile.Name())
+	}()
+
+	if err := uploadFile(ctx, fileClient, tempFile); err != nil {
 		return "", fmt.Errorf("upload adls file %s: %w", filePath, err)
 	}
 
@@ -72,6 +77,6 @@ func buildCredential(spec config.CredentialSpec) (azcore.TokenCredential, error)
 	}
 }
 
-func uploadFile(ctx context.Context, fileClient *file.Client, raw []byte) error {
-	return fileClient.UploadBuffer(ctx, raw, nil)
+func uploadFile(ctx context.Context, fileClient *file.Client, source *os.File) error {
+	return fileClient.UploadFile(ctx, source, nil)
 }

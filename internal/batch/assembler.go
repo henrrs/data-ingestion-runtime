@@ -1,9 +1,9 @@
 package batch
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"time"
 
 	"landing-connector/internal/config"
@@ -31,18 +31,13 @@ func NewAssembler(cfg config.BatchConfig, runID string, now time.Time) *Assemble
 }
 
 func (a *Assembler) Add(msg model.KafkaMessage, includeKey bool, includeHeaders bool) error {
-	payloadJSON, err := stringifyPayload(msg.Value)
-	if err != nil {
-		return fmt.Errorf("stringify payload at offset %d: %w", msg.Offset, err)
-	}
-
 	record := model.LandingRecord{
 		IngestionTime: time.Now().UTC(),
 		RunID:         a.runID,
 		Topic:         msg.Topic,
 		Partition:     msg.Partition,
 		Offset:        msg.Offset,
-		PayloadJSON:   payloadJSON,
+		PayloadRaw:    slices.Clone(msg.Value),
 	}
 
 	if !msg.EventTime.IsZero() {
@@ -50,8 +45,7 @@ func (a *Assembler) Add(msg model.KafkaMessage, includeKey bool, includeHeaders 
 		record.EventTime = &eventTime
 	}
 	if includeKey {
-		key := string(msg.Key)
-		record.KeyString = &key
+		record.KeyRaw = slices.Clone(msg.Key)
 	}
 	if includeHeaders {
 		headersJSON, err := json.Marshal(msg.Headers)
@@ -96,22 +90,6 @@ func (a *Assembler) Window(now time.Time) model.BatchWindow {
 	w := a.window
 	w.EndedAt = now
 	return w
-}
-
-func stringifyPayload(raw []byte) (string, error) {
-	if len(raw) == 0 {
-		return "null", nil
-	}
-	if json.Valid(raw) {
-		return string(raw), nil
-	}
-	encoded, err := json.Marshal(map[string]string{
-		"base64_payload": base64.StdEncoding.EncodeToString(raw),
-	})
-	if err != nil {
-		return "", fmt.Errorf("marshal binary payload wrapper: %w", err)
-	}
-	return string(encoded), nil
 }
 
 func derefLen(value *string) int {

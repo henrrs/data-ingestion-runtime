@@ -8,7 +8,7 @@ A solucao processa dados em batches a partir de uma origem de eventos e os grava
 - destino de producao: ADLS Gen2
 - destino de teste local: MinIO
 - formato: Parquet com compressao ZSTD
-- payload: bruto, preservado em `payload_json`
+- payload: bruto, preservado em `payload_raw`
 
 ## Desenho logico
 
@@ -64,10 +64,10 @@ flowchart LR
 - `partition`
 - `offset`
 - `event_time`
-- `key_string`
+- `key_raw`
 - `headers_json`
 - `schema_id`
-- `payload_json`
+- `payload_raw`
 
 ## Semantica
 

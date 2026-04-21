@@ -22,7 +22,9 @@ Usaremos tres niveis de documentacao:
 ## Indice
 
 - [system-overview.md](system-overview.md)
+- [current-connector-flow.md](current-connector-flow.md)
 - [performance-analysis.md](performance-analysis.md)
+- [implementation-plan-performance.md](implementation-plan-performance.md)
 - [decisions/0001-hexagonal-architecture.md](decisions/0001-hexagonal-architecture.md)
 - [decisions/0002-landing-parquet-raw-payload.md](decisions/0002-landing-parquet-raw-payload.md)
 - [decisions/0003-batch-scale-to-zero.md](decisions/0003-batch-scale-to-zero.md)

@@ -36,6 +36,15 @@ func TestApplyDefaultsNormalizesCase(t *testing.T) {
 	if cfg.Kafka.Security.Mechanism != "PLAIN" {
 		t.Fatalf("expected mechanism to be normalized, got %q", cfg.Kafka.Security.Mechanism)
 	}
+	if cfg.Runtime.MaxParallelFlushes <= 0 {
+		t.Fatalf("expected runtime.max_parallel_flushes default to be > 0, got %d", cfg.Runtime.MaxParallelFlushes)
+	}
+	if cfg.Runtime.PartitionQueueSize <= 0 {
+		t.Fatalf("expected runtime.partition_queue_size default to be > 0, got %d", cfg.Runtime.PartitionQueueSize)
+	}
+	if cfg.Runtime.PprofAddr != "127.0.0.1:6060" {
+		t.Fatalf("expected runtime.pprof_addr default, got %q", cfg.Runtime.PprofAddr)
+	}
 }
 
 func TestValidateRejectsNonZeroCommitInterval(t *testing.T) {
@@ -55,6 +64,23 @@ func TestValidateRejectsUnsupportedCompression(t *testing.T) {
 	err := cfg.Validate()
 	if err == nil || !strings.Contains(err.Error(), "parquet_compression") {
 		t.Fatalf("expected parquet_compression validation error, got %v", err)
+	}
+}
+
+func TestValidateRejectsInvalidRuntimeSettings(t *testing.T) {
+	cfg := validMinIOConfig()
+	cfg.Runtime.MaxParallelFlushes = 0
+
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "max_parallel_flushes") {
+		t.Fatalf("expected max_parallel_flushes validation error, got %v", err)
+	}
+
+	cfg = validMinIOConfig()
+	cfg.Runtime.PartitionQueueSize = 0
+	err = cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "partition_queue_size") {
+		t.Fatalf("expected partition_queue_size validation error, got %v", err)
 	}
 }
 
@@ -81,6 +107,10 @@ func validMinIOConfig() Config {
 		},
 		Output: OutputConfig{
 			ParquetCompression: "zstd",
+		},
+		Runtime: RuntimeConfig{
+			MaxParallelFlushes: 1,
+			PartitionQueueSize: 1,
 		},
 	}
 }

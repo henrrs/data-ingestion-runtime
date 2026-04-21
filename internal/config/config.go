@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	goRuntime "runtime"
 	"strings"
 	"time"
 
@@ -20,6 +21,7 @@ type Config struct {
 	ADLS       ADLSConfig    `yaml:"adls"`
 	MinIO      MinIOConfig   `yaml:"minio"`
 	Output     OutputConfig  `yaml:"output"`
+	Runtime    RuntimeConfig `yaml:"runtime"`
 }
 
 type SourceConfig struct {
@@ -84,6 +86,13 @@ type OutputConfig struct {
 	FilePrefix         string `yaml:"file_prefix"`
 }
 
+type RuntimeConfig struct {
+	MaxParallelFlushes int    `yaml:"max_parallel_flushes"`
+	PartitionQueueSize int    `yaml:"partition_queue_size"`
+	PprofEnabled       bool   `yaml:"pprof_enabled"`
+	PprofAddr          string `yaml:"pprof_addr"`
+}
+
 func Load(path string) (Config, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -120,6 +129,15 @@ func (c *Config) applyDefaults() {
 	if c.ADLS.Credential.Mode == "" {
 		c.ADLS.Credential.Mode = "default_azure_credential"
 	}
+	if c.Runtime.MaxParallelFlushes == 0 {
+		c.Runtime.MaxParallelFlushes = min(goRuntime.GOMAXPROCS(0), 4)
+	}
+	if c.Runtime.PartitionQueueSize == 0 {
+		c.Runtime.PartitionQueueSize = c.Runtime.MaxParallelFlushes * 2
+	}
+	if c.Runtime.PprofAddr == "" {
+		c.Runtime.PprofAddr = "127.0.0.1:6060"
+	}
 
 	c.Source.Type = strings.ToLower(c.Source.Type)
 	c.Sink.Type = strings.ToLower(c.Sink.Type)
@@ -150,6 +168,10 @@ func (c Config) Validate() error {
 		return errors.New("batch.max_bytes must be > 0")
 	case c.Batch.MaxDuration <= 0:
 		return errors.New("batch.max_duration must be > 0")
+	case c.Runtime.MaxParallelFlushes <= 0:
+		return errors.New("runtime.max_parallel_flushes must be > 0")
+	case c.Runtime.PartitionQueueSize <= 0:
+		return errors.New("runtime.partition_queue_size must be > 0")
 	}
 
 	switch c.Output.ParquetCompression {
@@ -190,4 +212,11 @@ func (c Config) Validate() error {
 	}
 
 	return nil
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

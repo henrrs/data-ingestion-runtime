@@ -1,312 +1,377 @@
 # Analise de Performance
 
-Este documento consolida o baseline de performance observado no teste de estresse mais recente do conector e lista os proximos passos recomendados para melhorar throughput, uso de memoria e previsibilidade operacional.
+Este documento consolida os testes de estresse executados no conector, registra os resultados mais relevantes e resume os aprendizados que devem orientar a proxima rodada de otimizacao.
 
 ## Objetivo
 
-Responder tres perguntas:
+Responder quatro perguntas:
 
-1. O conector consegue drenar um backlog grande com payload pouco compressivel?
-2. Onde estao os gargalos mais provaveis no pipeline atual?
-3. Qual a sequencia mais segura de ajustes para melhorar performance?
+1. O conector consegue drenar backlog grande com payload pouco compressivel?
+2. O que mudou depois das melhorias recentes no pipeline?
+3. Qual compressao entrega o melhor equilibrio entre throughput, memoria e tamanho final?
+4. Quais sao os proximos gargalos reais a atacar?
 
-## Cenario testado
+## Ambiente e Carga
 
-Data do teste valido:
+Ambiente local usado nos testes validos:
 
-- `2026-04-20` em UTC
+- data principal dos testes: `2026-04-20`
+- Redpanda local com pelo menos `2 vCPU` e `2 GiB`
+- MinIO local como sink
+- topicos com `6` particoes
 
-Carga gerada:
+Carga padrao usada para comparacao:
 
-- `1.000.000` eventos
-- `8 KiB` por evento
 - payload `pseudo-random` deterministico
 - baixa compressibilidade
-- `6` particoes Kafka
-
-Configuracao relevante do teste:
-
-- topico: `orders-stress-1m-8kb-rand-6p-20260419-1`
+- `8 KiB` por evento
 - `batch.max_records: 10000`
 - `batch.max_bytes: 104857600`
 - `batch.max_duration: 10m`
-- `output.parquet_compression: zstd`
 - `output.include_headers: true`
 - `output.include_key: true`
-- sink: MinIO local
-- source: Kafka local em Redpanda
 
-Observacao importante:
+Observacao operacional importante:
 
-- a primeira tentativa nao foi considerada valida para baseline porque o broker local caiu no meio da carga quando estava configurado com apenas `1 vCPU` e `1 GiB`
-- o teste valido foi repetido com o broker local recriado com `2 vCPU` e `2 GiB`
+- durante a bateria maior de comparacao por codec, o host local saturou disco ao tentar materializar multiplos cenarios grandes em sequencia
+- por isso a comparacao completa entre codecs foi consolidada em `500.000` eventos, e nao em `1.000.000`, para manter repetibilidade sem contaminar o resultado com falha do ambiente
 
-## Resultado consolidado
+## Linha do Tempo dos Testes
 
-### Producao Kafka
+### 1. Baseline original antes das melhorias
 
-- `1.000.000` eventos produzidos com sucesso
-- payload bruto total: `7812.50 MiB`
-- tempo total do produtor: `3m00.619s`
-- throughput medio do produtor: `5537 eventos/s`
-- throughput medio bruto do produtor: `43.25 MiB/s`
-- pico de memoria do produtor: `136.95 MiB`
+Este foi o baseline documentado antes da refatoracao do pipeline.
 
-### Consumo e escrita do conector
-
-- `1.000.000` eventos consumidos com sucesso
-- tempo total do conector: `254.99s`
-- throughput medio do conector: `3921.72 eventos/s`
-- throughput medio bruto equivalente: `30.64 MiB/s`
-- pico de memoria do conector: `766.58 MiB`
-- `100` flushes executados
-- `100` arquivos Parquet gerados
-- `10000` registros por arquivo
-- tamanho observado por arquivo: tipicamente entre `70 MiB` e `72 MiB`
-- volume final no MinIO: aproximadamente `6.9 GiB`
-- consumer group final com `TOTAL-LAG 0`
-
-### Distribuicao nas particoes
-
-A distribuicao ficou equilibrada entre as `6` particoes:
-
-- particao `0`: `166546`
-- particao `1`: `166720`
-- particao `2`: `166579`
-- particao `3`: `166879`
-- particao `4`: `167070`
-- particao `5`: `166206`
-
-### Leitura rapida do resultado
-
-- o pipeline funcionou corretamente de ponta a ponta
-- o conector sustentou a drenagem completa do backlog sem perder offsets
-- o conector foi mais lento que o produtor neste cenario
-- a compressao ZSTD ajudou pouco, o que e coerente com um payload desenhado para ser pouco compressivel
-
-## O que os numeros indicam
-
-### 1. O batch foi limitado por `max_records`, nao por `max_bytes`
-
-Os logs do flush mostraram repetidamente:
-
-- `records: 10000`
-- `bytes_approx: 82410000`
-
-Ou seja:
-
-- cada lote tinha aproximadamente `82.41 MB`
-- o limite de `100 MiB` nao foi atingido
-- o gatilho real de flush foi `max_records`
-
-Conclusao pratica:
-
-- hoje, aumentar `max_bytes` sozinho nao deve mudar esse perfil
-- qualquer tuning de lote precisa comecar por `max_records`
-
-### 2. O uso de memoria esta alto para um lote de ~82 MB
-
-O processo do conector atingiu aproximadamente `766 MiB` de RSS para lotes que, em bytes aproximados, ficaram perto de `82 MB`.
-
-Isso sugere forte overhead de alocacao e copias intermediarias. Essa leitura e consistente com o codigo atual em:
-
-- `internal/batch/assembler.go`
-- `internal/adapters/sink/parquetutil/writer.go`
-- `internal/adapters/sink/minio/sink.go`
-
-### 3. O pipeline atual e fortemente serial
-
-Em `internal/app/runner.go`, o fluxo efetivo e:
-
-1. poll do Kafka
-2. montagem do lote em memoria
-3. escrita completa do Parquet
-4. upload completo do objeto
-5. commit dos offsets
-6. volta ao poll
-
-Durante o flush, o loop principal nao continua consumindo nem preparando o proximo lote. Isso reduz paralelismo e faz throughput depender do trecho mais lento da etapa de flush.
-
-### 4. O ganho de compressao foi modesto
-
-O payload bruto do teste foi de `7812.50 MiB`, e o volume final materializado ficou em torno de `6.9 GiB`.
-
-Em outras palavras:
-
-- houve alguma compressao
-- mas o ganho foi relativamente pequeno
-- esse comportamento e esperado para payload pseudo-random e de baixa compressibilidade
-
-Conclusao pratica:
-
-- aumentar nivel de compressao do ZSTD provavelmente vai custar CPU demais para pouco beneficio de tamanho
-- vale testar `snappy` ou `uncompressed` como comparativo de throughput
-
-## Gargalos mais provaveis no codigo atual
-
-As observacoes abaixo sao inferencias baseadas no codigo e nos resultados do teste.
-
-### 1. Copias repetidas do payload na montagem do lote
-
-Em `internal/batch/assembler.go`:
-
-- `json.Valid(raw)` percorre todo o payload
-- `string(raw)` cria uma nova string para o payload JSON
-- `json.Marshal(msg.Headers)` gera nova alocacao para headers
-- `string(msg.Key)` gera nova alocacao para a chave
-
-Para `1.000.000` eventos de `8 KiB`, isso representa custo relevante de CPU e GC.
-
-### 2. Conversao completa para um segundo slice antes de gravar o Parquet
-
-Em `internal/adapters/sink/parquetutil/writer.go`:
-
-- `WriteRecords` recebe `[]model.LandingRecord`
-- depois cria outro slice completo via `convert(...)`
-- essa conversao e feita a cada flush
-
-Isso duplica trabalho e memoria para cada lote.
-
-### 3. Bufferizacao completa do arquivo antes do upload
-
-Em `internal/adapters/sink/minio/sink.go`:
-
-- o Parquet inteiro e gerado em um `bytes.Buffer`
-- so depois o `PutObject` envia o objeto ao MinIO
-
-Esse desenho impede sobrepor geracao e upload e aumenta o pico de memoria.
-
-### 4. Escrita e commit totalmente sincronizados no caminho quente
-
-Em `internal/app/runner.go`:
-
-- `flush()` escreve no sink
-- depois faz commit
-- so entao volta a consumir
-
-Esse desenho simplifica semantica operacional, mas limita throughput.
-
-## Proximos passos recomendados
-
-### Prioridade 0: estabilizar o ambiente de benchmark
-
-Antes de otimizar o conector, o ambiente local precisa ser suficiente para nao mascarar o resultado.
-
-Acoes:
-
-- manter um perfil de benchmark local com Redpanda em pelo menos `2 vCPU` e `2 GiB`
-- separar um `docker-compose` ou profile especifico para testes de carga
-- registrar os parametros do ambiente junto do resultado
-
-Impacto esperado:
-
-- melhora a confiabilidade das comparacoes entre execucoes
-
-### Prioridade 1: reduzir picos de memoria e copias desnecessarias
-
-Esta e a frente com melhor relacao risco/beneficio.
-
-Acoes:
-
-- eliminar a conversao `[]LandingRecord -> []landingRecordZstd` no `parquetutil`
-- escrever Parquet de forma incremental, sem montar um segundo slice completo
-- trocar o `bytes.Buffer` por streaming com `io.Pipe` entre writer Parquet e `PutObject`
-- revisar se `payload_json` precisa mesmo passar por `json.Valid` em todos os eventos
-- tornar `include_headers` e `include_key` opcionais por workload real e desabilitar quando nao forem necessarios
-
-Impacto esperado:
-
-- reducao forte do RSS
-- menos pressao de GC
-- mais throughput por flush
-
-### Prioridade 2: aumentar paralelismo do pipeline
-
-Hoje o pipeline e essencialmente monolitico e sincronizado.
-
-Acoes:
-
-- separar consumo, serializacao e upload em estagios independentes
-- permitir que um lote seja comprimido e enviado enquanto o proximo ja esta sendo montado
-- considerar um pool limitado de workers de flush
-- manter commit apenas apos confirmacao segura da persistencia do lote
-
-Impacto esperado:
-
-- melhor uso de CPU
-- menor tempo ocioso entre polls
-- throughput maior em topicos com varias particoes
-
-Risco:
-
-- aumenta complexidade de ordenacao e checkpoint
-- exige cuidado para nao comprometer a semantica de commit atual
-
-### Prioridade 3: revisar o contrato do payload
-
-Hoje o payload vai para o lote como `string` em `PayloadJSON`.
-
-Acoes:
-
-- avaliar armazenar o payload como `[]byte` ou `BINARY` em vez de `string`
-- tratar validacao JSON como responsabilidade opcional, nao obrigatoria do caminho quente
-- se essa mudanca for adotada, registrar a alteracao por ADR porque impacta schema e consumo downstream
-
-Impacto esperado:
-
-- menos copias
-- menor custo de CPU
-- caminho de ingestao mais proximo do payload bruto original
-
-### Prioridade 4: tunar codec e tamanho de batch com dados reais
-
-Com payload pouco compressivel, compressao mais agressiva tende a piorar custo/beneficio.
-
-Acoes:
-
-- comparar `zstd`, `snappy` e `uncompressed`
-- repetir benchmark com `max_records` em `5000`, `10000` e `15000`
-- medir o efeito de `include_headers=false` e `include_key=false`
-- repetir com payloads mais proximos do trafego real de producao
-
-Impacto esperado:
-
-- encontrar o melhor ponto entre CPU, memoria e tamanho final
-
-## Ordem sugerida de execucao
-
-Sequencia recomendada para implementar sem perder rastreabilidade:
-
-1. Criar perfil de benchmark estavel
-2. Implementar escrita do sink sem `bytes.Buffer` completo
-3. Remover a conversao extra no `parquetutil`
-4. Medir novamente o mesmo cenario `1M x 8 KiB x 6 particoes`
-5. So depois experimentar paralelismo de flush
-6. Por ultimo, revisar schema do payload se ainda houver gargalo relevante
-
-## Benchmark minimo da proxima rodada
-
-Para a proxima iteracao, vale repetir exatamente este conjunto:
+Cenario:
 
 - `1.000.000` eventos
 - `8 KiB`
-- payload pseudo-random
 - `6` particoes
-- comparar `zstd` vs `snappy`
-- comparar implementacao atual vs sink com streaming
+- compressao `zstd`
 
-Metricas minimas a registrar:
+Resultado:
 
-- eventos por segundo
-- MiB/s de payload bruto
-- RSS maximo
-- numero de arquivos
-- tamanho total materializado
-- lag final
-- tempo total do conector
+- produtor: `3m00.619s`, `5537 ev/s`, pico `136.95 MiB`
+- conector: `254.99s`, `3921.72 ev/s`, pico `766.58 MiB`
+- volume final no MinIO: aproximadamente `6.9 GiB`
+- `100` arquivos Parquet
+- lag final `0`
 
-## Conclusao
+Leitura:
 
-O conector esta funcional e consistente sob carga pesada, mas o baseline mostra um desenho ainda caro em memoria e excessivamente serial para workloads grandes e pouco compressiveis.
+- o pipeline drenava corretamente o backlog
+- o caminho ainda era fortemente serial
+- o uso de memoria ja era alto, mas ainda bem menor que nas primeiras tentativas de refatoracao
 
-O melhor proximo passo nao e aumentar batch nem apertar mais a compressao. O melhor proximo passo e reduzir copias e bufferizacao no caminho quente, e depois introduzir paralelismo controlado.
+### 2. Revalidacao apos as melhorias do pipeline
+
+Depois da implementacao de:
+
+- upload com tamanho conhecido em arquivo temporario
+- flush assincrono controlado por particao
+- limite global de concorrencia
+- `pprof` opcional e tooling de benchmark
+
+foi executado novo teste grande com `zstd`.
+
+Cenario:
+
+- `1.000.000` eventos
+- `8 KiB`
+- `6` particoes
+- compressao `zstd`
+
+Resultado:
+
+- produtor: `154.60s`, pico `119780 KB`
+- conector: `236.81s`, pico `3130832 KB`
+- throughput do conector: aproximadamente `4223 ev/s`
+- volume final no MinIO: `7376259355` bytes, cerca de `6.87 GiB`
+- `102` arquivos Parquet
+
+Leitura:
+
+- houve melhora de throughput em relacao ao baseline original
+- o tempo do conector caiu de `254.99s` para `236.81s`
+- o custo foi um aumento muito forte de memoria, de ~`766 MiB` para ~`3.0 GiB`
+
+Conclusao:
+
+- a nova arquitetura trouxe ganho real de throughput
+- o proximo gargalo mais claro passou a ser memoria, e nao somente serializacao serial
+
+### 3. Refatoracao para landing raw com `payload_raw BINARY`
+
+Depois da mudanca do contrato da landing para:
+
+- `payload_raw` como `BINARY`
+- `key_raw` como `BINARY`
+- remocao de `json.Valid`
+- remocao da conversao obrigatoria para `string`
+
+foi executada uma nova matriz comparavel com a mesma carga de `500.000` eventos.
+
+Objetivo:
+
+- medir o ganho do modo binario frente ao modelo textual anterior
+
+## Matriz Comparavel por Codec
+
+Para comparar codecs em condicoes controladas e evitar a saturacao de disco do host, foi rodada uma matriz com:
+
+- `500.000` eventos
+- `8 KiB`
+- `6` particoes
+- mesma configuracao de batch
+- mesmo pipeline concorrente novo
+
+### Resultado Consolidado
+
+| Codec | Tempo produtor | Tempo conector | Throughput conector | Pico RSS conector | Volume final | Arquivos |
+| --- | --- | --- | --- | --- | --- | --- |
+| `zstd` | `118.82s` | `181.71s` | ~`2752 ev/s` | `3019688 KB` | `3687490021` bytes | `54` |
+| `snappy` | `138.94s` | `179.01s` | ~`2793 ev/s` | `2733800 KB` | `4023632015` bytes | `54` |
+| `uncompressed` | `132.53s` | `124.01s` | ~`4032 ev/s` | `2726632 KB` | `4171246235` bytes | `54` |
+
+### Leitura Rapida da Matriz
+
+- `uncompressed` foi o melhor codec para throughput por ampla margem
+- `snappy` foi ligeiramente melhor que `zstd` em tempo total e tambem usou menos memoria
+- `zstd` foi o melhor em tamanho final, mas o pior custo-beneficio para esse workload especifico
+
+### Diferenca de Volume Final
+
+Para esse payload de baixa compressibilidade:
+
+- `zstd` gerou cerca de `3.43 GiB`
+- `snappy` gerou cerca de `3.75 GiB`
+- `uncompressed` gerou cerca de `3.88 GiB`
+
+Ou seja:
+
+- `zstd` economizou espaco
+- mas o ganho de tamanho sobre `snappy` e `uncompressed` foi pequeno diante do custo de CPU e do impacto no tempo total
+
+## Matriz Comparavel com Landing Raw Binary
+
+Depois da refatoracao para `payload_raw BINARY`, foi rodada nova matriz em ambiente limpo com a mesma carga:
+
+- `500.000` eventos
+- `8 KiB`
+- `6` particoes
+- mesmo lote e mesma concorrencia
+
+### Resultado Consolidado
+
+| Codec | Tempo produtor | Tempo conector | Throughput conector | Pico RSS conector | Volume final | Arquivos |
+| --- | --- | --- | --- | --- | --- | --- |
+| `zstd` | `82.09s` | `142.34s` | ~`3513 ev/s` | `2896028 KB` | `3685759371` bytes | `54` |
+| `snappy` | `75.07s` | `139.60s` | ~`3582 ev/s` | `3242752 KB` | `4021116995` bytes | `54` |
+| `uncompressed` | `143.51s` | `182.92s` | ~`2733 ev/s` | `3318496 KB` | `4170892271` bytes | `54` |
+
+Observacao importante:
+
+- a primeira tentativa de `snappy` binario terminou com `lag` residual e por isso foi descartada
+- o resultado valido de `snappy` e o rerun com `TOTAL-LAG 0`
+
+### Comparacao Direta: Textual vs Binary
+
+#### `zstd`
+
+- tempo do conector: `181.71s -> 142.34s` (`-21.67%`)
+- RSS: `3019688 KB -> 2896028 KB` (`-4.10%`)
+- volume final: praticamente estavel (`-0.05%`)
+
+#### `snappy`
+
+- tempo do conector: `179.01s -> 139.60s` (`-22.02%`)
+- RSS: `2733800 KB -> 3242752 KB` (`+18.62%`)
+- volume final: praticamente estavel (`-0.06%`)
+
+#### `uncompressed`
+
+- tempo do conector: `124.01s -> 182.92s` (`+47.50%`)
+- RSS: `2726632 KB -> 3318496 KB` (`+21.71%`)
+- volume final: praticamente estavel (`-0.01%`)
+
+### Leitura Rapida da Mudanca para Binary
+
+- `payload_raw BINARY` ajudou claramente quando havia compressao (`zstd` e `snappy`)
+- o ganho principal apareceu em CPU e tempo total, nao em tamanho final
+- a mudanca piorou fortemente o perfil de `uncompressed`
+
+Inferencia pratica:
+
+- remover validacao JSON e conversao para string economiza trabalho no caminho quente
+- isso beneficia mais os codecs comprimidos
+- no caso de `uncompressed`, o writer Parquet com coluna binaria parece ter ficado menos eficiente do que a coluna textual anterior
+
+Conclusao provisoria:
+
+- a direcao `raw binary` faz sentido para o conector
+- mas o codec operacional recomendado deixa de ser `uncompressed`
+- com o contrato binario, `zstd` e `snappy` passam a ser os perfis mais interessantes
+
+## Falhas e Limites Observados
+
+### Saturacao de disco do host
+
+Durante a bateria maior de `1.000.000` eventos por codec:
+
+- o cenario `snappy` nao terminou limpo
+- a causa observada foi o host local ficar sem espaco em disco
+- isso interrompeu a execucao antes do fechamento completo do benchmark
+
+Isso nao foi tratado como falha funcional do conector.
+
+### Um rerun de `snappy` binario foi necessario
+
+Na primeira execucao do cenario `snappy` binario:
+
+- o conector encerrou com `TOTAL-LAG 103413`
+- o resultado foi descartado da comparacao final
+
+Foi executado novo teste do mesmo cenario e o rerun fechou com:
+
+- `TOTAL-LAG 0`
+- `54` arquivos
+- `4021116995` bytes finais
+
+Portanto:
+
+- o numero oficial considerado e o rerun
+- a primeira execucao foi tratada como anomalia de benchmark
+
+### Pressao de memoria continua alta
+
+Mesmo depois das melhorias:
+
+- o novo pipeline continua usando muita memoria
+- o teste `1M + zstd` passou de `3 GiB` de RSS
+- mesmo `uncompressed`, que foi o melhor em throughput na matriz comparavel, ainda ficou perto de `2.7 GiB`
+
+Isso sugere que ainda existe bastante custo em:
+
+- montagem do lote em memoria
+- representacao do payload como `string`
+- duplicacoes e alocacoes no caminho de serializacao
+
+## Aprendizados Consolidados
+
+### 1. O pipeline novo melhora throughput, mas desloca o gargalo para memoria
+
+O ganho de throughput veio com:
+
+- workers por particao
+- flush concorrente controlado
+- upload com tamanho conhecido
+
+Mas o RSS ficou alto demais para um conector que ainda trabalha com lotes de aproximadamente `82 MB` brutos.
+
+Leitura pratica:
+
+- a direcao arquitetural foi correta
+- o proximo foco nao deve ser voltar ao pipeline serial
+- o proximo foco deve ser reduzir alocacoes e copies no caminho quente
+
+### 2. Para payload pouco compressivel, `zstd` nao parece ser o default ideal
+
+Nos testes atuais:
+
+- `zstd` ganhou em tamanho final
+- `snappy` ganhou um pouco em velocidade
+- `uncompressed` ganhou muito em throughput
+
+Leitura pratica:
+
+- se a prioridade for throughput, `uncompressed` e hoje a melhor opcao observada
+- se a prioridade for equilibrio entre tamanho e desempenho, `snappy` parece o candidato mais forte
+- `zstd` so faz mais sentido quando reducao de volume for mais importante que tempo de drenagem
+
+Depois da mudanca para `payload_raw BINARY`, essa leitura muda:
+
+- `uncompressed` deixou de ser a melhor opcao
+- `snappy` e `zstd` passaram a ganhar com clareza do modelo binario
+
+Leitura pratica atualizada:
+
+- para landing binaria, `snappy` parece o melhor equilibrio
+- `zstd` segue forte quando volume armazenado importa
+- `uncompressed` nao deve ser o default do perfil binario sem nova investigacao
+
+### 3. O ambiente local influencia muito a leitura dos resultados
+
+Dois efeitos ficaram claros:
+
+- CPU e memoria do Redpanda alteram fortemente o perfil do teste
+- espaco em disco do host pode invalidar execucoes longas mesmo quando o conector esta correto
+
+Leitura pratica:
+
+- comparacoes entre execucoes precisam sempre registrar a capacidade do ambiente
+- para baterias maiores, vale preparar um profile dedicado com mais disco livre
+
+### 4. O batch continua sendo limitado por `max_records`
+
+Nos logs de flush, o comportamento dominante permaneceu:
+
+- `records: 10000`
+- `bytes_approx` por lote na faixa de `82 MB`
+
+Leitura pratica:
+
+- o tuning principal de tamanho de lote continua comecando por `max_records`
+- aumentar apenas `max_bytes` dificilmente mudara esse perfil
+
+## Recomendacao Atual
+
+Se o objetivo principal for drenagem rapida de backlog em workload parecido com este:
+
+- recomendacao inicial para o contrato binario: `snappy`
+
+Se o objetivo for equilibrio entre espaco e desempenho:
+
+- recomendacao inicial: `snappy`
+
+Se o objetivo for minimizar volume armazenado:
+
+- recomendacao inicial: `zstd`, aceitando maior custo de CPU e tempo
+
+## Proximos Passos Recomendados
+
+### Prioridade 1. Atacar memoria e copies
+
+Acoes:
+
+- medir heap e allocs com `pprof` nos tres codecs
+- revisar `internal/batch/assembler.go` para reduzir copies de payload, key e headers
+- reavaliar `payload_json` como `string` no caminho quente
+- estudar representacao binaria ou conversao JSON opcional
+
+### Prioridade 2. Revisar estrategia de lote
+
+Acoes:
+
+- testar `max_records` menor, como `5000`, para ver se o tradeoff de throughput vs RSS melhora
+- comparar variacao de `max_parallel_flushes`
+- observar se menos concorrencia reduz RSS sem derrubar muito o throughput
+
+### Prioridade 3. Padronizar perfis operacionais
+
+Criar perfis explicitos:
+
+- perfil `throughput-first`: `uncompressed`
+- perfil `balanced`: `snappy`
+- perfil `storage-first`: `zstd`
+
+### Prioridade 4. So depois avaliar mudanca mais profunda de stack
+
+Apache Arrow ou mudanca maior de stack ainda nao sao a proxima etapa natural.
+
+Primeiro precisamos confirmar com `pprof`:
+
+- quanto da CPU vai para compressao
+- quanto vai para serializacao Parquet
+- quanto vai para alocacao e GC
+
+Sem essa confirmacao, trocar de stack agora aumentaria complexidade antes de resolver o gargalo mais evidente.

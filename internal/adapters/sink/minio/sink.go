@@ -1,9 +1,9 @@
 package minio
 
 import (
-	"bytes"
 	"context"
 	"fmt"
+	"os"
 
 	minio "github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
@@ -55,13 +55,17 @@ func (s *Sink) WriteWindow(ctx context.Context, window model.BatchWindow) (strin
 		return "", nil
 	}
 
-	var buffer bytes.Buffer
-	if err := parquetutil.WriteRecords(&buffer, window.Records, s.cfg.Output.ParquetCompression); err != nil {
+	objectPath := pathing.BuildFilePath(s.cfg.MinIO.BasePath, pathing.FilePrefix(s.cfg), window)
+	tempFile, size, err := parquetutil.WriteRecordsToTempFile(window.Records, s.cfg.Output.ParquetCompression)
+	if err != nil {
 		return "", err
 	}
+	defer func() {
+		_ = tempFile.Close()
+		_ = os.Remove(tempFile.Name())
+	}()
 
-	objectPath := pathing.BuildFilePath(s.cfg.MinIO.BasePath, pathing.FilePrefix(s.cfg), window)
-	_, err := s.client.PutObject(ctx, s.cfg.MinIO.Bucket, objectPath, &buffer, int64(buffer.Len()), minio.PutObjectOptions{
+	_, err = s.client.PutObject(ctx, s.cfg.MinIO.Bucket, objectPath, tempFile, size, minio.PutObjectOptions{
 		ContentType: "application/octet-stream",
 	})
 	if err != nil {

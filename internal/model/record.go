@@ -9,21 +9,21 @@ type LandingRecord struct {
 	Partition     int32     `parquet:"partition,zstd"`
 	Offset        int64     `parquet:"offset,zstd"`
 	EventTime     *int64    `parquet:"event_time,optional,timestamp(microsecond),zstd"`
-	KeyString     *string   `parquet:"key_string,optional,zstd"`
+	KeyRaw        []byte    `parquet:"key_raw,optional,zstd"`
 	HeadersJSON   *string   `parquet:"headers_json,optional,zstd"`
 	SchemaID      *int32    `parquet:"schema_id,optional,zstd"`
-	PayloadJSON   string    `parquet:"payload_json,zstd"`
+	PayloadRaw    []byte    `parquet:"payload_raw,zstd"`
 }
 
 type KafkaMessage struct {
-	Topic      string
-	Partition  int32
-	Offset     int64
-	EventTime  time.Time
-	Key        []byte
-	Value      []byte
-	Headers    map[string]string
-	SchemaID   int32
+	Topic     string
+	Partition int32
+	Offset    int64
+	EventTime time.Time
+	Key       []byte
+	Value     []byte
+	Headers   map[string]string
+	SchemaID  int32
 }
 
 type BatchWindow struct {

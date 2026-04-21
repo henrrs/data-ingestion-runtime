@@ -9,7 +9,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
+	"github.com/twmb/franz-go/pkg/kmsg"
 )
 
 func main() {
@@ -23,6 +25,9 @@ func main() {
 		batchSize    = flag.Int("batch-size", 1000, "Number of records per synchronous produce batch")
 		reportEvery  = flag.Int("report-every", 50000, "Progress interval in number of produced records")
 		keyPrefix    = flag.String("key-prefix", "order", "Prefix used when generating keys")
+		createTopic  = flag.Bool("create-topic", false, "Create the topic before producing")
+		partitions   = flag.Int("topic-partitions", 1, "Partition count to use when creating the topic")
+		replicas     = flag.Int("topic-replicas", 1, "Replication factor to use when creating the topic")
 	)
 	flag.Parse()
 
@@ -41,6 +46,14 @@ func main() {
 	if !isSupportedPayloadMode(*payloadMode) {
 		fail("payload-mode must be one of: repetitive, pseudo-random")
 	}
+	if *createTopic {
+		switch {
+		case *partitions <= 0:
+			fail("topic-partitions must be > 0 when -create-topic is enabled")
+		case *replicas <= 0:
+			fail("topic-replicas must be > 0 when -create-topic is enabled")
+		}
+	}
 
 	brokers := splitNonEmpty(*brokersFlag)
 	if len(brokers) == 0 {
@@ -56,6 +69,15 @@ func main() {
 		fail("create kafka producer: %v", err)
 	}
 	defer client.Close()
+
+	if *createTopic {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		err := ensureTopic(ctx, client, *topic, int32(*partitions), int16(*replicas))
+		cancel()
+		if err != nil {
+			fail("create topic %s: %v", *topic, err)
+		}
+	}
 
 	idWidth := len(strconv.Itoa(*count))
 	start := time.Now()
@@ -207,6 +229,38 @@ func topicOrPanic(topic string) string {
 		panic("topic must not be empty")
 	}
 	return topic
+}
+
+func ensureTopic(ctx context.Context, client *kgo.Client, topic string, partitions int32, replicas int16) error {
+	req := kmsg.NewCreateTopicsRequest()
+	req.TimeoutMillis = 60000
+	req.Topics = append(req.Topics, kmsg.CreateTopicsRequestTopic{
+		Topic:             topic,
+		NumPartitions:     partitions,
+		ReplicationFactor: replicas,
+	})
+
+	resp, err := req.RequestWith(ctx, client)
+	if err != nil {
+		return err
+	}
+	if len(resp.Topics) != 1 {
+		return fmt.Errorf("unexpected create topic response size: %d", len(resp.Topics))
+	}
+
+	result := resp.Topics[0]
+	if result.ErrorCode == 0 {
+		return nil
+	}
+
+	kafkaErr := kerr.ErrorForCode(result.ErrorCode)
+	if kafkaErr == kerr.TopicAlreadyExists {
+		return nil
+	}
+	if result.ErrorMessage != nil {
+		return fmt.Errorf("%w: %s", kafkaErr, *result.ErrorMessage)
+	}
+	return kafkaErr
 }
 
 func fail(message string, args ...any) {

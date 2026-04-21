@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"sync"
 	"time"
 
 	"go.uber.org/zap"
 
+	"landing-connector/internal/adapters/sink/fileformat"
 	"landing-connector/internal/batch"
 	"landing-connector/internal/config"
 	"landing-connector/internal/core"
@@ -20,6 +22,28 @@ type Runner struct {
 	logger *zap.Logger
 	source core.Source
 	sink   core.Sink
+}
+
+type flushTask struct {
+	partition int32
+	sequence  int64
+	window    model.BatchWindow
+}
+
+type encodedTask struct {
+	flushTask
+	file *os.File
+	size int64
+}
+
+type uploadedTask struct {
+	flushTask
+	filePath string
+}
+
+type partitionCommitState struct {
+	nextSequence int64
+	pending      map[int64]uploadedTask
 }
 
 const idlePollTimeout = 2 * time.Second
@@ -58,16 +82,20 @@ func (r *Runner) Run(ctx context.Context) error {
 	defer cancel()
 
 	var (
-		workersMu sync.Mutex
-		workers   = make(map[int32]chan model.KafkaMessage)
-		wg        sync.WaitGroup
-		commitMu  sync.Mutex
-		errOnce   sync.Once
-		closeOnce sync.Once
+		partitionsMu sync.Mutex
+		partitions   = make(map[int32]chan model.KafkaMessage)
+		closeOnce    sync.Once
+		partitionsWG sync.WaitGroup
+		encodesWG    sync.WaitGroup
+		uploadsWG    sync.WaitGroup
+		commitWG     sync.WaitGroup
+		errOnce      sync.Once
 	)
 
 	errCh := make(chan error, 1)
-	flushLimiter := make(chan struct{}, r.cfg.Runtime.MaxParallelFlushes)
+	flushTasks := make(chan flushTask, r.cfg.Runtime.FlushQueueSize)
+	encodedTasks := make(chan encodedTask, r.cfg.Runtime.FlushQueueSize)
+	uploadedTasks := make(chan uploadedTask, r.cfg.Runtime.FlushQueueSize)
 
 	reportErr := func(err error) {
 		if err == nil {
@@ -79,31 +107,65 @@ func (r *Runner) Run(ctx context.Context) error {
 		})
 	}
 
-	closeWorkers := func() {
+	closePartitions := func() {
 		closeOnce.Do(func() {
-			workersMu.Lock()
-			defer workersMu.Unlock()
-			for _, messages := range workers {
+			partitionsMu.Lock()
+			defer partitionsMu.Unlock()
+			for _, messages := range partitions {
 				close(messages)
 			}
 		})
 	}
-	defer closeWorkers()
+	defer closePartitions()
+
+	for i := 0; i < r.cfg.Runtime.MaxParallelEncodes; i++ {
+		encodesWG.Add(1)
+		go func() {
+			defer encodesWG.Done()
+			if err := r.runEncodeWorker(runCtx, flushTasks, encodedTasks); err != nil && !errors.Is(err, context.Canceled) {
+				reportErr(err)
+			}
+		}()
+	}
+
+	for i := 0; i < r.cfg.Runtime.MaxParallelUploads; i++ {
+		uploadsWG.Add(1)
+		go func() {
+			defer uploadsWG.Done()
+			if err := r.runUploadWorker(runCtx, encodedTasks, uploadedTasks); err != nil && !errors.Is(err, context.Canceled) {
+				reportErr(err)
+			}
+		}()
+	}
+
+	commitWG.Add(1)
+	go func() {
+		defer commitWG.Done()
+		if err := r.runCommitCoordinator(runCtx, uploadedTasks); err != nil && !errors.Is(err, context.Canceled) {
+			reportErr(err)
+		}
+	}()
+
+	commitDone := make(chan struct{})
+	go func() {
+		commitWG.Wait()
+		close(commitDone)
+	}()
 
 	getPartitionQueue := func(partition int32) chan model.KafkaMessage {
-		workersMu.Lock()
-		defer workersMu.Unlock()
+		partitionsMu.Lock()
+		defer partitionsMu.Unlock()
 
-		if messages, exists := workers[partition]; exists {
+		if messages, exists := partitions[partition]; exists {
 			return messages
 		}
 
 		messages := make(chan model.KafkaMessage, r.cfg.Runtime.PartitionQueueSize)
-		workers[partition] = messages
-		wg.Add(1)
+		partitions[partition] = messages
+		partitionsWG.Add(1)
 		go func() {
-			defer wg.Done()
-			if err := r.runPartitionWorker(runCtx, runID, partition, messages, flushLimiter, &commitMu); err != nil && !errors.Is(err, context.Canceled) {
+			defer partitionsWG.Done()
+			if err := r.runPartitionWorker(runCtx, runID, partition, messages, flushTasks); err != nil && !errors.Is(err, context.Canceled) {
 				reportErr(err)
 			}
 		}()
@@ -111,38 +173,36 @@ func (r *Runner) Run(ctx context.Context) error {
 		return messages
 	}
 
+	var runErr error
+
+pollLoop:
 	for {
 		select {
 		case err := <-errCh:
-			wg.Wait()
-			return err
+			runErr = err
+			break pollLoop
 		default:
 		}
 
 		if err := ctx.Err(); err != nil {
+			runErr = err
 			cancel()
-			wg.Wait()
-			return err
+			break
 		}
 
 		pollCtx, pollCancel := context.WithTimeout(runCtx, idlePollTimeout)
 		messages, err := r.source.Poll(pollCtx, 1000)
 		pollCancel()
 		if err != nil {
-			if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+			if errors.Is(err, context.DeadlineExceeded) && runCtx.Err() == nil && ctx.Err() == nil {
 				break
 			}
 			if runCtx.Err() != nil {
-				select {
-				case reportedErr := <-errCh:
-					wg.Wait()
-					return reportedErr
-				default:
-				}
+				break
 			}
+			runErr = fmt.Errorf("poll kafka: %w", err)
 			cancel()
-			wg.Wait()
-			return fmt.Errorf("poll kafka: %w", err)
+			break
 		}
 
 		if len(messages) == 0 {
@@ -151,31 +211,34 @@ func (r *Runner) Run(ctx context.Context) error {
 
 		for _, msg := range messages {
 			queue := getPartitionQueue(msg.Partition)
-			select {
-			case queue <- msg:
-			case err := <-errCh:
-				wg.Wait()
-				return err
-			case <-runCtx.Done():
-				select {
-				case reportedErr := <-errCh:
-					wg.Wait()
-					return reportedErr
-				default:
-					wg.Wait()
-					return runCtx.Err()
+			if err := sendWithContext(runCtx, queue, msg); err != nil {
+				if runErr == nil {
+					runErr = err
 				}
+				break pollLoop
 			}
 		}
 	}
 
-	closeWorkers()
-	wg.Wait()
+	closePartitions()
+	partitionsWG.Wait()
+	close(flushTasks)
+	encodesWG.Wait()
+	close(encodedTasks)
+	uploadsWG.Wait()
+	close(uploadedTasks)
+	<-commitDone
 
-	select {
-	case err := <-errCh:
-		return err
-	default:
+	if runErr == nil {
+		select {
+		case err := <-errCh:
+			runErr = err
+		default:
+		}
+	}
+
+	if runErr != nil {
+		return runErr
 	}
 
 	r.logger.Info("pipeline finished",
@@ -190,10 +253,30 @@ func (r *Runner) runPartitionWorker(
 	runID string,
 	partition int32,
 	messages <-chan model.KafkaMessage,
-	flushLimiter chan struct{},
-	commitMu *sync.Mutex,
+	flushTasks chan<- flushTask,
 ) error {
 	assembler := batch.NewAssembler(r.cfg.Batch, runID, time.Now().UTC())
+	var sequence int64
+
+	flushWindow := func(now time.Time) error {
+		window := assembler.Window(now)
+		if len(window.Records) == 0 {
+			return nil
+		}
+
+		task := flushTask{
+			partition: partition,
+			sequence:  sequence,
+			window:    window,
+		}
+		if err := sendWithContext(ctx, flushTasks, task); err != nil {
+			return err
+		}
+
+		sequence++
+		assembler = batch.NewAssembler(r.cfg.Batch, runID, now)
+		return nil
+	}
 
 	for {
 		select {
@@ -201,61 +284,166 @@ func (r *Runner) runPartitionWorker(
 			return ctx.Err()
 		case msg, ok := <-messages:
 			if !ok {
-				window := assembler.Window(time.Now().UTC())
-				if len(window.Records) == 0 {
-					return nil
-				}
-				return r.flush(ctx, window, partition, flushLimiter, commitMu)
+				return flushWindow(time.Now().UTC())
 			}
 
 			if err := assembler.Add(msg, r.cfg.Output.IncludeKey, r.cfg.Output.IncludeHeaders); err != nil {
 				return err
 			}
 			if assembler.ShouldFlush(time.Now().UTC()) {
-				window := assembler.Window(time.Now().UTC())
-				if err := r.flush(ctx, window, partition, flushLimiter, commitMu); err != nil {
+				if err := flushWindow(time.Now().UTC()); err != nil {
 					return err
 				}
-				assembler = batch.NewAssembler(r.cfg.Batch, runID, time.Now().UTC())
 			}
 		}
 	}
 }
 
-func (r *Runner) flush(
+func (r *Runner) runEncodeWorker(
 	ctx context.Context,
-	window model.BatchWindow,
-	partition int32,
-	flushLimiter chan struct{},
-	commitMu *sync.Mutex,
+	flushTasks <-chan flushTask,
+	encodedTasks chan<- encodedTask,
 ) error {
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case task, ok := <-flushTasks:
+			if !ok {
+				return nil
+			}
+
+			file, size, err := fileformat.WriteRecordsToTempFile(task.window.Records, r.cfg.Output)
+			if err != nil {
+				return fmt.Errorf("encode window partition=%d sequence=%d: %w", task.partition, task.sequence, err)
+			}
+
+			encoded := encodedTask{
+				flushTask: task,
+				file:      file,
+				size:      size,
+			}
+			if err := sendWithContext(ctx, encodedTasks, encoded); err != nil {
+				_ = cleanupEncodedTask(encoded)
+				return err
+			}
+		}
+	}
+}
+
+func (r *Runner) runUploadWorker(
+	ctx context.Context,
+	encodedTasks <-chan encodedTask,
+	uploadedTasks chan<- uploadedTask,
+) error {
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case task, ok := <-encodedTasks:
+			if !ok {
+				return nil
+			}
+
+			filePath, err := r.sink.UploadWindowFile(ctx, task.window, task.file, task.size)
+			cleanupErr := cleanupEncodedTask(task)
+			if err != nil {
+				return fmt.Errorf("upload window partition=%d sequence=%d: %w", task.partition, task.sequence, err)
+			}
+			if cleanupErr != nil {
+				return fmt.Errorf("cleanup encoded window partition=%d sequence=%d: %w", task.partition, task.sequence, cleanupErr)
+			}
+
+			uploaded := uploadedTask{
+				flushTask: task.flushTask,
+				filePath:  filePath,
+			}
+			if err := sendWithContext(ctx, uploadedTasks, uploaded); err != nil {
+				return err
+			}
+		}
+	}
+}
+
+func (r *Runner) runCommitCoordinator(ctx context.Context, uploadedTasks <-chan uploadedTask) error {
+	states := make(map[int32]*partitionCommitState)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case task, ok := <-uploadedTasks:
+			if !ok {
+				return nil
+			}
+
+			state := states[task.partition]
+			if state == nil {
+				state = &partitionCommitState{
+					pending: make(map[int64]uploadedTask),
+				}
+				states[task.partition] = state
+			}
+
+			state.pending[task.sequence] = task
+			for {
+				nextTask, exists := state.pending[state.nextSequence]
+				if !exists {
+					break
+				}
+
+				if err := r.source.Commit(ctx, nextTask.window); err != nil {
+					return fmt.Errorf("commit offsets partition=%d sequence=%d: %w", nextTask.partition, nextTask.sequence, err)
+				}
+
+				r.logger.Info("batch flushed",
+					zap.String("pipeline_id", r.cfg.PipelineID),
+					zap.String("run_id", nextTask.window.RunID),
+					zap.String("file_path", nextTask.filePath),
+					zap.Int32("partition", nextTask.partition),
+					zap.Int64("sequence", nextTask.sequence),
+					zap.Int("records", len(nextTask.window.Records)),
+					zap.Int("bytes_approx", nextTask.window.BytesApprox),
+					zap.Time("started_at", nextTask.window.StartedAt),
+					zap.Time("ended_at", nextTask.window.EndedAt),
+				)
+
+				delete(state.pending, state.nextSequence)
+				state.nextSequence++
+			}
+		}
+	}
+}
+
+func cleanupEncodedTask(task encodedTask) error {
+	var err error
+	if task.file == nil {
+		return nil
+	}
+	if closeErr := task.file.Close(); closeErr != nil {
+		err = errors.Join(err, closeErr)
+	}
+	if removeErr := os.Remove(task.file.Name()); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+		err = errors.Join(err, removeErr)
+	}
+	return err
+}
+
+func sendWithContext[T any](ctx context.Context, target chan<- T, value T) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				err = ctxErr
+				return
+			}
+			err = fmt.Errorf("send on closed channel: %v", recovered)
+		}
+	}()
+
 	select {
-	case flushLimiter <- struct{}{}:
-		defer func() { <-flushLimiter }()
+	case target <- value:
+		return nil
 	case <-ctx.Done():
 		return ctx.Err()
 	}
-
-	filePath, err := r.sink.WriteWindow(ctx, window)
-	if err != nil {
-		return fmt.Errorf("write sink: %w", err)
-	}
-	commitMu.Lock()
-	err = r.source.Commit(ctx, window)
-	commitMu.Unlock()
-	if err != nil {
-		return fmt.Errorf("commit offsets: %w", err)
-	}
-
-	r.logger.Info("batch flushed",
-		zap.String("pipeline_id", r.cfg.PipelineID),
-		zap.String("run_id", window.RunID),
-		zap.String("file_path", filePath),
-		zap.Int32("partition", partition),
-		zap.Int("records", len(window.Records)),
-		zap.Int("bytes_approx", window.BytesApprox),
-		zap.Time("started_at", window.StartedAt),
-		zap.Time("ended_at", window.EndedAt),
-	)
-	return nil
 }

@@ -15,6 +15,7 @@ RANDOM_SEED="${RANDOM_SEED:-20260419}"
 BATCH_SIZE="${BATCH_SIZE:-1000}"
 REPORT_EVERY="${REPORT_EVERY:-100000}"
 COMPRESSIONS="${COMPRESSIONS:-zstd snappy uncompressed}"
+OUTPUT_FORMAT="${OUTPUT_FORMAT:-parquet}"
 PIPELINE_ID="${PIPELINE_ID:-orders-stress}"
 CONSUMER_GROUP_PREFIX="${CONSUMER_GROUP_PREFIX:-orders-stress-cg}"
 TOPIC_PREFIX="${TOPIC_PREFIX:-orders-stress}"
@@ -24,12 +25,23 @@ MINIO_ACCESS_KEY="${MINIO_ACCESS_KEY:-minioadmin}"
 MINIO_SECRET_KEY="${MINIO_SECRET_KEY:-minioadmin}"
 MINIO_BASE_PATH_PREFIX="${MINIO_BASE_PATH_PREFIX:-source=kafka}"
 FLUSH_WORKERS="${FLUSH_WORKERS:-2}"
+ENCODE_WORKERS="${ENCODE_WORKERS:-$FLUSH_WORKERS}"
+UPLOAD_WORKERS="${UPLOAD_WORKERS:-$FLUSH_WORKERS}"
 PARTITION_QUEUE_SIZE="${PARTITION_QUEUE_SIZE:-4}"
+FLUSH_QUEUE_SIZE="${FLUSH_QUEUE_SIZE:-0}"
 RUN_TIMEOUT="${RUN_TIMEOUT:-30m}"
 KEEP_TOPICS="${KEEP_TOPICS:-false}"
 BATCH_MAX_RECORDS="${BATCH_MAX_RECORDS:-10000}"
 BATCH_MAX_BYTES="${BATCH_MAX_BYTES:-104857600}"
 BATCH_MAX_DURATION="${BATCH_MAX_DURATION:-10m}"
+
+if [[ "$FLUSH_QUEUE_SIZE" == "0" ]]; then
+  if (( ENCODE_WORKERS > UPLOAD_WORKERS )); then
+    FLUSH_QUEUE_SIZE=$((ENCODE_WORKERS * 2))
+  else
+    FLUSH_QUEUE_SIZE=$((UPLOAD_WORKERS * 2))
+  fi
+fi
 
 if ! command -v docker-compose >/dev/null 2>&1; then
   echo "docker-compose is required" >&2
@@ -82,12 +94,16 @@ minio:
   use_ssl: false
   force_path_style: true
 output:
-  parquet_compression: ${compression}
+  format: ${OUTPUT_FORMAT}
+  compression: ${compression}
   include_headers: true
   include_key: true
   file_prefix: part
 runtime:
   max_parallel_flushes: ${FLUSH_WORKERS}
+  max_parallel_encodes: ${ENCODE_WORKERS}
+  max_parallel_uploads: ${UPLOAD_WORKERS}
+  flush_queue_size: ${FLUSH_QUEUE_SIZE}
   partition_queue_size: ${PARTITION_QUEUE_SIZE}
   pprof_enabled: false
   pprof_addr: 127.0.0.1:6060

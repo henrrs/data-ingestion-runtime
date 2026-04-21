@@ -10,7 +10,7 @@ import (
 	"landing-connector/internal/model"
 )
 
-func BuildFilePath(basePath string, filePrefix string, window model.BatchWindow) string {
+func BuildFilePath(basePath string, filePrefix string, window model.BatchWindow, extension string) string {
 	start := window.StartedAt.UTC()
 	partitions := make([]int, 0, len(window.OffsetsByPart))
 	for partition := range window.OffsetsByPart {
@@ -25,10 +25,11 @@ func BuildFilePath(basePath string, filePrefix string, window model.BatchWindow)
 	}
 
 	fileName := fmt.Sprintf(
-		"%s-%s-%s.parquet",
+		"%s-%s-%s.%s",
 		filePrefix,
 		window.RunID,
 		strings.Join(suffixParts, "_"),
+		extension,
 	)
 
 	return path.Join(

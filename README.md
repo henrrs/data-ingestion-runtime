@@ -1,12 +1,12 @@
 # Landing Connector
 
-Conector batch para consumir dados de um topico Kafka e gravar arquivos Parquet com compressao ZSTD em uma landing zone object storage.
+Conector batch para consumir dados de um topico Kafka e gravar arquivos Parquet ou Avro em uma landing zone object storage.
 
 ## Caracteristicas do MVP
 
 - Consumo Kafka com commit manual
 - Batch limitado por tempo, quantidade de registros e bytes aproximados
-- Escrita em Parquet com payload bruto preservado
+- Escrita em Parquet ou Avro com payload bruto preservado
 - Colunas tecnicas do Kafka para auditoria e replay
 - Manifest simplificado em logs estruturados
 - Preparado para execucao em `Kubernetes CronJob`
@@ -35,6 +35,13 @@ Veja o exemplo em [configs/orders.example.yaml](configs/orders.example.yaml).
 Para teste local com MinIO, veja [configs/orders.minio.example.yaml](configs/orders.minio.example.yaml).
 Para ambiente local de integracao, veja [deploy/docker-compose.local.yml](deploy/docker-compose.local.yml).
 Ao subir o ambiente local, o Redpanda Console fica em `http://localhost:8080` e o MinIO Console em `http://localhost:9001`.
+
+Os knobs principais de throughput ficam em `runtime`:
+
+- `max_parallel_encodes`: paralelismo da etapa de serializacao para arquivo temporario
+- `max_parallel_uploads`: paralelismo da etapa de envio ao sink
+- `flush_queue_size`: buffer entre `assemble -> encode -> upload`
+- `partition_queue_size`: buffer de entrada por particao antes de aplicar backpressure
 
 ## Arquitetura
 

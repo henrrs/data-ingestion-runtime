@@ -80,6 +80,8 @@ type CredentialSpec struct {
 }
 
 type OutputConfig struct {
+	Format             string `yaml:"format"`
+	Compression        string `yaml:"compression"`
 	ParquetCompression string `yaml:"parquet_compression"`
 	IncludeHeaders     bool   `yaml:"include_headers"`
 	IncludeKey         bool   `yaml:"include_key"`
@@ -88,6 +90,9 @@ type OutputConfig struct {
 
 type RuntimeConfig struct {
 	MaxParallelFlushes int    `yaml:"max_parallel_flushes"`
+	MaxParallelEncodes int    `yaml:"max_parallel_encodes"`
+	MaxParallelUploads int    `yaml:"max_parallel_uploads"`
+	FlushQueueSize     int    `yaml:"flush_queue_size"`
 	PartitionQueueSize int    `yaml:"partition_queue_size"`
 	PprofEnabled       bool   `yaml:"pprof_enabled"`
 	PprofAddr          string `yaml:"pprof_addr"`
@@ -120,8 +125,20 @@ func (c *Config) applyDefaults() {
 	if c.Sink.Type == "" {
 		c.Sink.Type = "adls"
 	}
+	if c.Output.Format == "" {
+		c.Output.Format = "parquet"
+	}
+	if c.Output.Compression == "" {
+		if c.Output.ParquetCompression != "" {
+			c.Output.Compression = c.Output.ParquetCompression
+		} else if c.Output.Format == "avro" {
+			c.Output.Compression = "snappy"
+		} else {
+			c.Output.Compression = "zstd"
+		}
+	}
 	if c.Output.ParquetCompression == "" {
-		c.Output.ParquetCompression = "zstd"
+		c.Output.ParquetCompression = c.Output.Compression
 	}
 	if c.Output.FilePrefix == "" {
 		c.Output.FilePrefix = "part"
@@ -132,8 +149,17 @@ func (c *Config) applyDefaults() {
 	if c.Runtime.MaxParallelFlushes == 0 {
 		c.Runtime.MaxParallelFlushes = min(goRuntime.GOMAXPROCS(0), 4)
 	}
+	if c.Runtime.MaxParallelEncodes == 0 {
+		c.Runtime.MaxParallelEncodes = c.Runtime.MaxParallelFlushes
+	}
+	if c.Runtime.MaxParallelUploads == 0 {
+		c.Runtime.MaxParallelUploads = c.Runtime.MaxParallelFlushes
+	}
+	if c.Runtime.FlushQueueSize == 0 {
+		c.Runtime.FlushQueueSize = max(c.Runtime.MaxParallelEncodes, c.Runtime.MaxParallelUploads) * 2
+	}
 	if c.Runtime.PartitionQueueSize == 0 {
-		c.Runtime.PartitionQueueSize = c.Runtime.MaxParallelFlushes * 2
+		c.Runtime.PartitionQueueSize = c.Runtime.MaxParallelUploads * 2
 	}
 	if c.Runtime.PprofAddr == "" {
 		c.Runtime.PprofAddr = "127.0.0.1:6060"
@@ -141,6 +167,8 @@ func (c *Config) applyDefaults() {
 
 	c.Source.Type = strings.ToLower(c.Source.Type)
 	c.Sink.Type = strings.ToLower(c.Sink.Type)
+	c.Output.Format = strings.ToLower(c.Output.Format)
+	c.Output.Compression = strings.ToLower(c.Output.Compression)
 	c.Output.ParquetCompression = strings.ToLower(c.Output.ParquetCompression)
 	c.ADLS.Credential.Mode = strings.ToLower(c.ADLS.Credential.Mode)
 	c.Kafka.Security.Mechanism = strings.ToUpper(c.Kafka.Security.Mechanism)
@@ -170,14 +198,31 @@ func (c Config) Validate() error {
 		return errors.New("batch.max_duration must be > 0")
 	case c.Runtime.MaxParallelFlushes <= 0:
 		return errors.New("runtime.max_parallel_flushes must be > 0")
+	case c.Runtime.MaxParallelEncodes <= 0:
+		return errors.New("runtime.max_parallel_encodes must be > 0")
+	case c.Runtime.MaxParallelUploads <= 0:
+		return errors.New("runtime.max_parallel_uploads must be > 0")
+	case c.Runtime.FlushQueueSize <= 0:
+		return errors.New("runtime.flush_queue_size must be > 0")
 	case c.Runtime.PartitionQueueSize <= 0:
 		return errors.New("runtime.partition_queue_size must be > 0")
 	}
 
-	switch c.Output.ParquetCompression {
-	case "uncompressed", "snappy", "gzip", "brotli", "lz4", "zstd":
+	switch c.Output.Format {
+	case "parquet":
+		switch c.Output.Compression {
+		case "uncompressed", "snappy", "gzip", "brotli", "lz4", "zstd":
+		default:
+			return fmt.Errorf("unsupported output.compression for format=parquet: %s", c.Output.Compression)
+		}
+	case "avro":
+		switch c.Output.Compression {
+		case "null", "snappy", "deflate":
+		default:
+			return fmt.Errorf("unsupported output.compression for format=avro: %s", c.Output.Compression)
+		}
 	default:
-		return fmt.Errorf("unsupported output.parquet_compression: %s", c.Output.ParquetCompression)
+		return fmt.Errorf("unsupported output.format: %s", c.Output.Format)
 	}
 
 	switch c.Source.Type {
@@ -219,4 +264,20 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func (o OutputConfig) FileExtension() string {
+	switch o.Format {
+	case "avro":
+		return "avro"
+	default:
+		return "parquet"
+	}
 }

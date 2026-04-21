@@ -13,7 +13,10 @@ func TestApplyDefaultsNormalizesCase(t *testing.T) {
 		Kafka: KafkaConfig{
 			Security: KafkaSecurity{Mechanism: "plain"},
 		},
-		Output: OutputConfig{ParquetCompression: "ZSTD"},
+		Output: OutputConfig{
+			Format:             "PaRqUeT",
+			ParquetCompression: "ZSTD",
+		},
 		ADLS: ADLSConfig{
 			Credential: CredentialSpec{Mode: "DEFAULT_AZURE_CREDENTIAL"},
 		},
@@ -27,6 +30,12 @@ func TestApplyDefaultsNormalizesCase(t *testing.T) {
 	if cfg.Sink.Type != "minio" {
 		t.Fatalf("expected sink.type to be normalized, got %q", cfg.Sink.Type)
 	}
+	if cfg.Output.Format != "parquet" {
+		t.Fatalf("expected output.format to be normalized, got %q", cfg.Output.Format)
+	}
+	if cfg.Output.Compression != "zstd" {
+		t.Fatalf("expected output.compression to be normalized, got %q", cfg.Output.Compression)
+	}
 	if cfg.Output.ParquetCompression != "zstd" {
 		t.Fatalf("expected parquet compression to be normalized, got %q", cfg.Output.ParquetCompression)
 	}
@@ -38,6 +47,15 @@ func TestApplyDefaultsNormalizesCase(t *testing.T) {
 	}
 	if cfg.Runtime.MaxParallelFlushes <= 0 {
 		t.Fatalf("expected runtime.max_parallel_flushes default to be > 0, got %d", cfg.Runtime.MaxParallelFlushes)
+	}
+	if cfg.Runtime.MaxParallelEncodes <= 0 {
+		t.Fatalf("expected runtime.max_parallel_encodes default to be > 0, got %d", cfg.Runtime.MaxParallelEncodes)
+	}
+	if cfg.Runtime.MaxParallelUploads <= 0 {
+		t.Fatalf("expected runtime.max_parallel_uploads default to be > 0, got %d", cfg.Runtime.MaxParallelUploads)
+	}
+	if cfg.Runtime.FlushQueueSize <= 0 {
+		t.Fatalf("expected runtime.flush_queue_size default to be > 0, got %d", cfg.Runtime.FlushQueueSize)
 	}
 	if cfg.Runtime.PartitionQueueSize <= 0 {
 		t.Fatalf("expected runtime.partition_queue_size default to be > 0, got %d", cfg.Runtime.PartitionQueueSize)
@@ -59,11 +77,32 @@ func TestValidateRejectsNonZeroCommitInterval(t *testing.T) {
 
 func TestValidateRejectsUnsupportedCompression(t *testing.T) {
 	cfg := validMinIOConfig()
-	cfg.Output.ParquetCompression = "zip"
+	cfg.Output.Compression = "zip"
 
 	err := cfg.Validate()
-	if err == nil || !strings.Contains(err.Error(), "parquet_compression") {
-		t.Fatalf("expected parquet_compression validation error, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "output.compression") {
+		t.Fatalf("expected output.compression validation error, got %v", err)
+	}
+}
+
+func TestValidateAcceptsAvroCompression(t *testing.T) {
+	cfg := validMinIOConfig()
+	cfg.Output.Format = "avro"
+	cfg.Output.Compression = "snappy"
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected avro config to be valid, got %v", err)
+	}
+}
+
+func TestValidateRejectsUnsupportedAvroCompression(t *testing.T) {
+	cfg := validMinIOConfig()
+	cfg.Output.Format = "avro"
+	cfg.Output.Compression = "zstd"
+
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "format=avro") {
+		t.Fatalf("expected avro compression validation error, got %v", err)
 	}
 }
 
@@ -74,6 +113,27 @@ func TestValidateRejectsInvalidRuntimeSettings(t *testing.T) {
 	err := cfg.Validate()
 	if err == nil || !strings.Contains(err.Error(), "max_parallel_flushes") {
 		t.Fatalf("expected max_parallel_flushes validation error, got %v", err)
+	}
+
+	cfg = validMinIOConfig()
+	cfg.Runtime.MaxParallelEncodes = 0
+	err = cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "max_parallel_encodes") {
+		t.Fatalf("expected max_parallel_encodes validation error, got %v", err)
+	}
+
+	cfg = validMinIOConfig()
+	cfg.Runtime.MaxParallelUploads = 0
+	err = cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "max_parallel_uploads") {
+		t.Fatalf("expected max_parallel_uploads validation error, got %v", err)
+	}
+
+	cfg = validMinIOConfig()
+	cfg.Runtime.FlushQueueSize = 0
+	err = cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "flush_queue_size") {
+		t.Fatalf("expected flush_queue_size validation error, got %v", err)
 	}
 
 	cfg = validMinIOConfig()
@@ -106,10 +166,15 @@ func validMinIOConfig() Config {
 			Bucket:    "landing",
 		},
 		Output: OutputConfig{
+			Format:             "parquet",
+			Compression:        "zstd",
 			ParquetCompression: "zstd",
 		},
 		Runtime: RuntimeConfig{
 			MaxParallelFlushes: 1,
+			MaxParallelEncodes: 1,
+			MaxParallelUploads: 1,
+			FlushQueueSize:     1,
 			PartitionQueueSize: 1,
 		},
 	}

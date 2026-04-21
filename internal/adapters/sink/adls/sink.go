@@ -10,7 +10,6 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azdatalake/file"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azdatalake/filesystem"
 
-	"landing-connector/internal/adapters/sink/parquetutil"
 	"landing-connector/internal/adapters/sink/pathing"
 	"landing-connector/internal/config"
 	"landing-connector/internal/model"
@@ -39,27 +38,22 @@ func New(_ context.Context, cfg config.Config) (*Sink, error) {
 	}, nil
 }
 
-func (s *Sink) WriteWindow(ctx context.Context, window model.BatchWindow) (string, error) {
+func (s *Sink) UploadWindowFile(ctx context.Context, window model.BatchWindow, sourceFile *os.File, _ int64) (string, error) {
 	if len(window.Records) == 0 {
 		return "", nil
 	}
 
-	filePath := pathing.BuildFilePath(s.cfg.ADLS.BasePath, pathing.FilePrefix(s.cfg), window)
+	filePath := pathing.BuildFilePath(s.cfg.ADLS.BasePath, pathing.FilePrefix(s.cfg), window, s.cfg.Output.FileExtension())
 	fileClient := s.fsClient.NewFileClient(filePath)
 	if _, err := fileClient.Create(ctx, nil); err != nil {
 		return "", fmt.Errorf("create adls file %s: %w", filePath, err)
 	}
 
-	tempFile, _, err := parquetutil.WriteRecordsToTempFile(window.Records, s.cfg.Output.ParquetCompression)
-	if err != nil {
-		return "", err
+	if _, err := sourceFile.Seek(0, 0); err != nil {
+		return "", fmt.Errorf("rewind temp file for adls upload: %w", err)
 	}
-	defer func() {
-		_ = tempFile.Close()
-		_ = os.Remove(tempFile.Name())
-	}()
 
-	if err := uploadFile(ctx, fileClient, tempFile); err != nil {
+	if err := uploadFile(ctx, fileClient, sourceFile); err != nil {
 		return "", fmt.Errorf("upload adls file %s: %w", filePath, err)
 	}
 

@@ -3,15 +3,14 @@ package minio
 import (
 	"context"
 	"fmt"
-	"os"
 
 	minio "github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 
-	"landing-connector/internal/adapters/sink/parquetutil"
 	"landing-connector/internal/adapters/sink/pathing"
 	"landing-connector/internal/config"
 	"landing-connector/internal/model"
+	"os"
 )
 
 type Sink struct {
@@ -50,22 +49,17 @@ func New(ctx context.Context, cfg config.Config) (*Sink, error) {
 	}, nil
 }
 
-func (s *Sink) WriteWindow(ctx context.Context, window model.BatchWindow) (string, error) {
+func (s *Sink) UploadWindowFile(ctx context.Context, window model.BatchWindow, file *os.File, size int64) (string, error) {
 	if len(window.Records) == 0 {
 		return "", nil
 	}
 
-	objectPath := pathing.BuildFilePath(s.cfg.MinIO.BasePath, pathing.FilePrefix(s.cfg), window)
-	tempFile, size, err := parquetutil.WriteRecordsToTempFile(window.Records, s.cfg.Output.ParquetCompression)
-	if err != nil {
-		return "", err
+	objectPath := pathing.BuildFilePath(s.cfg.MinIO.BasePath, pathing.FilePrefix(s.cfg), window, s.cfg.Output.FileExtension())
+	if _, err := file.Seek(0, 0); err != nil {
+		return "", fmt.Errorf("rewind temp file for minio upload: %w", err)
 	}
-	defer func() {
-		_ = tempFile.Close()
-		_ = os.Remove(tempFile.Name())
-	}()
 
-	_, err = s.client.PutObject(ctx, s.cfg.MinIO.Bucket, objectPath, tempFile, size, minio.PutObjectOptions{
+	_, err := s.client.PutObject(ctx, s.cfg.MinIO.Bucket, objectPath, file, size, minio.PutObjectOptions{
 		ContentType: "application/octet-stream",
 	})
 	if err != nil {

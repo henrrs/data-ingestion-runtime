@@ -1,0 +1,22 @@
+PASS
+ok  	landing-connector/cmd/kafka-loadgen	0.004s
+?   	landing-connector/cmd/landing-connector	[no test files]
+?   	landing-connector/internal/adapters/sink/adls	[no test files]
+PASS
+ok  	landing-connector/internal/adapters/sink/avroutil	0.004s
+PASS
+ok  	landing-connector/internal/adapters/sink/fileformat	0.008s
+?   	landing-connector/internal/adapters/sink/minio	[no test files]
+PASS
+ok  	landing-connector/internal/adapters/sink/parquetutil	0.013s
+?   	landing-connector/internal/adapters/sink/pathing	[no test files]
+PASS
+ok  	landing-connector/internal/adapters/source/kafka	0.003s
+PASS
+ok  	landing-connector/internal/app	0.171s
+PASS
+ok  	landing-connector/internal/batch	0.004s
+PASS
+ok  	landing-connector/internal/config	0.003s
+?   	landing-connector/internal/core	[no test files]
+?   	landing-connector/internal/model	[no test files]

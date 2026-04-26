@@ -1,0 +1,4 @@
+produced=100000/300000 elapsed=48.728s records_per_sec=2052 mb_per_sec=16.03
+produced=200000/300000 elapsed=1m25.273s records_per_sec=2345 mb_per_sec=18.32
+produced=300000/300000 elapsed=1m53.318s records_per_sec=2647 mb_per_sec=20.68
+completed topic=orders-stress-snappy-20260426T001846Z count=300000 payload_bytes=8192 payload_mode=pseudo-random total_payload_mb=2343.75 elapsed=1m53.318s records_per_sec=2647 mb_per_sec=20.68

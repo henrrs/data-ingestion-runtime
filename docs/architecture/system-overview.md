@@ -7,7 +7,7 @@ A solucao processa dados em batches a partir de uma origem de eventos e os grava
 - origem: Kafka
 - destino de producao: ADLS Gen2
 - destino de teste local: MinIO
-- formato: Parquet com compressao ZSTD
+- formato: Avro OCF com compressao Snappy
 - payload: bruto, preservado em `payload_raw`
 
 ## Desenho logico

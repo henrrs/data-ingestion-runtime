@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -14,8 +15,8 @@ func TestApplyDefaultsNormalizesCase(t *testing.T) {
 			Security: KafkaSecurity{Mechanism: "plain"},
 		},
 		Output: OutputConfig{
-			Format:             "PaRqUeT",
-			ParquetCompression: "ZSTD",
+			Format:      "AvRo",
+			Compression: "SnApPy",
 		},
 		ADLS: ADLSConfig{
 			Credential: CredentialSpec{Mode: "DEFAULT_AZURE_CREDENTIAL"},
@@ -30,14 +31,11 @@ func TestApplyDefaultsNormalizesCase(t *testing.T) {
 	if cfg.Sink.Type != "minio" {
 		t.Fatalf("expected sink.type to be normalized, got %q", cfg.Sink.Type)
 	}
-	if cfg.Output.Format != "parquet" {
+	if cfg.Output.Format != "avro" {
 		t.Fatalf("expected output.format to be normalized, got %q", cfg.Output.Format)
 	}
-	if cfg.Output.Compression != "zstd" {
+	if cfg.Output.Compression != "snappy" {
 		t.Fatalf("expected output.compression to be normalized, got %q", cfg.Output.Compression)
-	}
-	if cfg.Output.ParquetCompression != "zstd" {
-		t.Fatalf("expected parquet compression to be normalized, got %q", cfg.Output.ParquetCompression)
 	}
 	if cfg.ADLS.Credential.Mode != "default_azure_credential" {
 		t.Fatalf("expected credential mode to be normalized, got %q", cfg.ADLS.Credential.Mode)
@@ -106,6 +104,16 @@ func TestValidateRejectsUnsupportedAvroCompression(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsUnsupportedOutputFormat(t *testing.T) {
+	cfg := validMinIOConfig()
+	cfg.Output.Format = "orc"
+
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "unsupported output.format") {
+		t.Fatalf("expected unsupported output.format error, got %v", err)
+	}
+}
+
 func TestValidateRejectsInvalidRuntimeSettings(t *testing.T) {
 	cfg := validMinIOConfig()
 	cfg.Runtime.MaxParallelFlushes = 0
@@ -144,6 +152,25 @@ func TestValidateRejectsInvalidRuntimeSettings(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsInvalidTempDir(t *testing.T) {
+	cfg := validMinIOConfig()
+	cfg.Runtime.TempDir = "/path/that/does/not/exist"
+
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "runtime.temp_dir") {
+		t.Fatalf("expected runtime.temp_dir validation error, got %v", err)
+	}
+}
+
+func TestValidateAcceptsExistingTempDir(t *testing.T) {
+	cfg := validMinIOConfig()
+	cfg.Runtime.TempDir = t.TempDir()
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected temp dir to be valid, got %v", err)
+	}
+}
+
 func validMinIOConfig() Config {
 	return Config{
 		PipelineID: "orders-landing",
@@ -166,9 +193,8 @@ func validMinIOConfig() Config {
 			Bucket:    "landing",
 		},
 		Output: OutputConfig{
-			Format:             "parquet",
-			Compression:        "zstd",
-			ParquetCompression: "zstd",
+			Format:      "avro",
+			Compression: "snappy",
 		},
 		Runtime: RuntimeConfig{
 			MaxParallelFlushes: 1,
@@ -176,6 +202,7 @@ func validMinIOConfig() Config {
 			MaxParallelUploads: 1,
 			FlushQueueSize:     1,
 			PartitionQueueSize: 1,
+			TempDir:            os.TempDir(),
 		},
 	}
 }

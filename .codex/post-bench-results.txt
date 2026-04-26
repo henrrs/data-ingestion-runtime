@@ -1,0 +1,38 @@
+PASS
+ok  	landing-connector/cmd/kafka-loadgen	0.005s
+?   	landing-connector/cmd/landing-connector	[no test files]
+?   	landing-connector/internal/adapters/sink/adls	[no test files]
+goos: linux
+goarch: amd64
+pkg: landing-connector/internal/adapters/sink/avroutil
+cpu: AMD Ryzen 5 2600X Six-Core Processor           
+BenchmarkStreamWriter-12    	  383698	      2850 ns/op	    5035 B/op	       1 allocs/op
+PASS
+ok  	landing-connector/internal/adapters/sink/avroutil	1.847s
+PASS
+ok  	landing-connector/internal/adapters/sink/fileformat	0.010s
+?   	landing-connector/internal/adapters/sink/minio	[no test files]
+goos: linux
+goarch: amd64
+pkg: landing-connector/internal/adapters/sink/parquetutil
+cpu: AMD Ryzen 5 2600X Six-Core Processor           
+BenchmarkStreamWriter-12    	  229237	      4904 ns/op	    1017 B/op	       1 allocs/op
+PASS
+ok  	landing-connector/internal/adapters/sink/parquetutil	2.107s
+?   	landing-connector/internal/adapters/sink/pathing	[no test files]
+goos: linux
+goarch: amd64
+pkg: landing-connector/internal/adapters/source/kafka
+cpu: AMD Ryzen 5 2600X Six-Core Processor           
+BenchmarkNewKafkaMessageHeadersOff-12    	68384552	        17.70 ns/op	       0 B/op	       0 allocs/op
+BenchmarkNewKafkaMessageHeadersOn-12     	 1886445	       641.6 ns/op	     112 B/op	       2 allocs/op
+PASS
+ok  	landing-connector/internal/adapters/source/kafka	3.951s
+PASS
+ok  	landing-connector/internal/app	0.315s
+PASS
+ok  	landing-connector/internal/batch	0.008s
+PASS
+ok  	landing-connector/internal/config	0.003s
+?   	landing-connector/internal/core	[no test files]
+?   	landing-connector/internal/model	[no test files]

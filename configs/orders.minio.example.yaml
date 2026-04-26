@@ -33,8 +33,8 @@ minio:
   force_path_style: true
 
 output:
-  format: parquet
-  compression: zstd
+  format: avro
+  compression: snappy
   include_headers: true
   include_key: true
   file_prefix: part
@@ -45,5 +45,6 @@ runtime:
   max_parallel_uploads: 2
   flush_queue_size: 8
   partition_queue_size: 8
+  temp_dir: /tmp/landing-connector
   pprof_enabled: false
   pprof_addr: 127.0.0.1:6060

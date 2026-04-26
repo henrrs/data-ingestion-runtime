@@ -1,25 +1,36 @@
 package batch
 
 import (
-	"encoding/json"
 	"fmt"
-	"slices"
+	"os"
 	"time"
 
+	"landing-connector/internal/adapters/sink/fileformat"
 	"landing-connector/internal/config"
 	"landing-connector/internal/model"
 )
 
+type PreparedWindow struct {
+	Window model.BatchWindow
+	File   *os.File
+	Size   int64
+}
+
 type Assembler struct {
 	cfg       config.BatchConfig
+	outputCfg config.OutputConfig
+	tempDir   string
 	runID     string
 	startedAt time.Time
 	window    model.BatchWindow
+	writer    fileformat.TempFileWriter
 }
 
-func NewAssembler(cfg config.BatchConfig, runID string, now time.Time) *Assembler {
+func NewAssembler(cfg config.BatchConfig, outputCfg config.OutputConfig, tempDir string, runID string, now time.Time) *Assembler {
 	return &Assembler{
 		cfg:       cfg,
+		outputCfg: outputCfg,
+		tempDir:   tempDir,
 		runID:     runID,
 		startedAt: now,
 		window: model.BatchWindow{
@@ -30,29 +41,25 @@ func NewAssembler(cfg config.BatchConfig, runID string, now time.Time) *Assemble
 	}
 }
 
-func (a *Assembler) Add(msg model.KafkaMessage, includeKey bool, includeHeaders bool) error {
+func (a *Assembler) Add(msg model.KafkaMessage) error {
 	record := model.LandingRecord{
-		IngestionTime: time.Now().UTC(),
+		IngestionTime: msg.IngestionTime,
 		RunID:         a.runID,
 		Topic:         msg.Topic,
 		Partition:     msg.Partition,
 		Offset:        msg.Offset,
-		PayloadRaw:    slices.Clone(msg.Value),
+		PayloadRaw:    msg.Value,
 	}
 
 	if !msg.EventTime.IsZero() {
 		eventTime := msg.EventTime.UTC().UnixMicro()
 		record.EventTime = &eventTime
 	}
-	if includeKey {
-		record.KeyRaw = slices.Clone(msg.Key)
+	if a.outputCfg.IncludeKey {
+		record.KeyRaw = msg.Key
 	}
-	if includeHeaders {
-		headersJSON, err := json.Marshal(msg.Headers)
-		if err != nil {
-			return fmt.Errorf("marshal headers at offset %d: %w", msg.Offset, err)
-		}
-		headers := string(headersJSON)
+	if len(msg.HeadersJSON) > 0 {
+		headers := string(msg.HeadersJSON)
 		record.HeadersJSON = &headers
 	}
 	if msg.SchemaID > 0 {
@@ -60,8 +67,13 @@ func (a *Assembler) Add(msg model.KafkaMessage, includeKey bool, includeHeaders 
 		record.SchemaID = &schemaID
 	}
 
-	a.window.Records = append(a.window.Records, record)
-	a.window.BytesApprox += len(msg.Value) + len(msg.Key) + derefLen(record.HeadersJSON)
+	if err := a.appendRecord(record); err != nil {
+		return err
+	}
+
+	a.window.Topic = msg.Topic
+	a.window.RecordCount++
+	a.window.BytesApprox += len(msg.Value) + len(record.KeyRaw) + len(msg.HeadersJSON)
 
 	offsetRange := a.window.OffsetsByPart[msg.Partition]
 	if offsetRange.RecordCount == 0 {
@@ -81,20 +93,50 @@ func (a *Assembler) Add(msg model.KafkaMessage, includeKey bool, includeHeaders 
 }
 
 func (a *Assembler) ShouldFlush(now time.Time) bool {
-	return len(a.window.Records) >= a.cfg.MaxRecords ||
+	return a.window.RecordCount >= a.cfg.MaxRecords ||
 		a.window.BytesApprox >= a.cfg.MaxBytes ||
 		now.Sub(a.startedAt) >= a.cfg.MaxDuration
 }
 
-func (a *Assembler) Window(now time.Time) model.BatchWindow {
-	w := a.window
-	w.EndedAt = now
-	return w
+func (a *Assembler) Window(now time.Time) (PreparedWindow, error) {
+	if a.window.RecordCount == 0 {
+		return PreparedWindow{}, nil
+	}
+
+	a.window.EndedAt = now
+	file, size, err := a.writer.Close()
+	if err != nil {
+		return PreparedWindow{}, fmt.Errorf("close temp writer: %w", err)
+	}
+	a.writer = nil
+
+	return PreparedWindow{
+		Window: a.window,
+		File:   file,
+		Size:   size,
+	}, nil
 }
 
-func derefLen(value *string) int {
-	if value == nil {
-		return 0
+func (a *Assembler) Abort() error {
+	if a.writer == nil {
+		return nil
 	}
-	return len(*value)
+	err := a.writer.Abort()
+	a.writer = nil
+	return err
+}
+
+func (a *Assembler) appendRecord(record model.LandingRecord) error {
+	if a.writer == nil {
+		writer, err := fileformat.NewTempFileWriter(a.outputCfg, a.tempDir)
+		if err != nil {
+			return fmt.Errorf("create temp writer: %w", err)
+		}
+		a.writer = writer
+	}
+
+	if err := a.writer.AppendRecord(record); err != nil {
+		return fmt.Errorf("append record to temp writer: %w", err)
+	}
+	return nil
 }

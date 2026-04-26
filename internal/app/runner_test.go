@@ -76,7 +76,7 @@ func (s *stubSink) UploadWindowFile(_ context.Context, window model.BatchWindow,
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.uploads = append(s.uploads, window)
-	return "s3://landing/test.parquet", nil
+	return "s3://landing/test.avro", nil
 }
 
 func TestRunnerFlushesPartialBatchAndStopsCleanlyOnIdlePollTimeout(t *testing.T) {
@@ -84,15 +84,14 @@ func TestRunnerFlushesPartialBatchAndStopsCleanlyOnIdlePollTimeout(t *testing.T)
 		pollResults: [][]model.KafkaMessage{
 			{
 				{
-					Topic:     "orders",
-					Partition: 0,
-					Offset:    10,
-					EventTime: time.Date(2026, time.April, 20, 1, 30, 0, 0, time.UTC),
-					Key:       []byte("order-10"),
-					Value:     []byte(`{"id":10}`),
-					Headers: map[string]string{
-						"source": "test",
-					},
+					Topic:         "orders",
+					Partition:     0,
+					Offset:        10,
+					EventTime:     time.Date(2026, time.April, 20, 1, 30, 0, 0, time.UTC),
+					IngestionTime: time.Date(2026, time.April, 20, 1, 30, 1, 0, time.UTC),
+					Key:           []byte("order-10"),
+					Value:         []byte(`{"id":10}`),
+					HeadersJSON:   []byte(`{"source":"test"}`),
 				},
 			},
 		},
@@ -118,7 +117,7 @@ func TestRunnerFlushesPartialBatchAndStopsCleanlyOnIdlePollTimeout(t *testing.T)
 	if len(source.commits) != 1 {
 		t.Fatalf("expected 1 commit, got %d", len(source.commits))
 	}
-	if got := len(sink.uploads[0].Records); got != 1 {
+	if got := sink.uploads[0].RecordCount; got != 1 {
 		t.Fatalf("expected flushed window to contain 1 record, got %d", got)
 	}
 }
@@ -140,6 +139,44 @@ func TestRunnerStopsCleanlyWhenIdleBeforeReceivingMessages(t *testing.T) {
 	}
 	if len(source.commits) != 0 {
 		t.Fatalf("expected no commits, got %d", len(source.commits))
+	}
+}
+
+func TestRunnerDoesNotStopOnFirstIdleTimeoutAfterSeeingMessages(t *testing.T) {
+	source := &stubSource{
+		pollResults: [][]model.KafkaMessage{
+			{
+				{Topic: "orders", Partition: 0, Offset: 10, Value: []byte(`{"id":10}`)},
+			},
+			nil,
+			{
+				{Topic: "orders", Partition: 0, Offset: 11, Value: []byte(`{"id":11}`)},
+			},
+		},
+		pollErrors: []error{
+			nil,
+			context.DeadlineExceeded,
+			nil,
+			context.DeadlineExceeded,
+			context.DeadlineExceeded,
+			context.DeadlineExceeded,
+		},
+	}
+
+	sink := &stubSink{}
+	runner := newTestRunner(source, sink, func(cfg *config.Config) {
+		cfg.Batch.MaxRecords = 1
+	})
+
+	if err := runner.Run(context.Background()); err != nil {
+		t.Fatalf("run returned error: %v", err)
+	}
+
+	if got := len(sink.uploads); got != 2 {
+		t.Fatalf("expected 2 uploads after intermittent idle timeout, got %d", got)
+	}
+	if got := len(source.commits); got != 2 {
+		t.Fatalf("expected 2 commits after intermittent idle timeout, got %d", got)
 	}
 }
 
@@ -200,12 +237,12 @@ func TestRunnerFlushesDifferentPartitionsConcurrently(t *testing.T) {
 	}
 }
 
-func TestRunnerAllowsSamePartitionUploadsInParallel(t *testing.T) {
+func TestRunnerAppliesMaxParallelFlushes(t *testing.T) {
 	source := &stubSource{
 		pollResults: [][]model.KafkaMessage{
 			{
 				{Topic: "orders", Partition: 0, Offset: 10, Value: []byte(`{"id":10}`)},
-				{Topic: "orders", Partition: 0, Offset: 11, Value: []byte(`{"id":11}`)},
+				{Topic: "orders", Partition: 1, Offset: 20, Value: []byte(`{"id":20}`)},
 			},
 		},
 		pollErrors: []error{nil, context.DeadlineExceeded},
@@ -219,11 +256,10 @@ func TestRunnerAllowsSamePartitionUploadsInParallel(t *testing.T) {
 	}
 	runner := newTestRunner(source, sink, func(cfg *config.Config) {
 		cfg.Batch.MaxRecords = 1
-		cfg.Runtime.MaxParallelFlushes = 2
+		cfg.Runtime.MaxParallelFlushes = 1
 		cfg.Runtime.MaxParallelEncodes = 2
 		cfg.Runtime.MaxParallelUploads = 2
 		cfg.Runtime.FlushQueueSize = 2
-		cfg.Runtime.PartitionQueueSize = 2
 	})
 
 	errCh := make(chan error, 1)
@@ -231,12 +267,16 @@ func TestRunnerAllowsSamePartitionUploadsInParallel(t *testing.T) {
 		errCh <- runner.Run(context.Background())
 	}()
 
-	for i := 0; i < 2; i++ {
-		select {
-		case <-started:
-		case <-time.After(2 * time.Second):
-			t.Fatal("timed out waiting for same-partition uploads to start")
-		}
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for first upload to start")
+	}
+
+	select {
+	case <-started:
+		t.Fatal("expected second upload to be blocked by max_parallel_flushes")
+	case <-time.After(150 * time.Millisecond):
 	}
 
 	close(releaseWrites)
@@ -249,10 +289,6 @@ func TestRunnerAllowsSamePartitionUploadsInParallel(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for runner to finish")
 	}
-
-	if len(sink.uploads) != 2 {
-		t.Fatalf("expected 2 uploads, got %d", len(sink.uploads))
-	}
 }
 
 type outOfOrderSink struct {
@@ -262,7 +298,7 @@ type outOfOrderSink struct {
 }
 
 func (s *outOfOrderSink) UploadWindowFile(_ context.Context, window model.BatchWindow, _ *os.File, _ int64) (string, error) {
-	offset := window.Records[0].Offset
+	offset := window.OffsetsByPart[0].StartOffset
 	if s.started != nil {
 		s.started <- offset
 	}
@@ -272,7 +308,7 @@ func (s *outOfOrderSink) UploadWindowFile(_ context.Context, window model.BatchW
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return "s3://landing/test.parquet", nil
+	return "s3://landing/test.avro", nil
 }
 
 func TestRunnerCommitsSamePartitionInOrderWhenUploadsFinishOutOfOrder(t *testing.T) {
@@ -330,18 +366,15 @@ func TestRunnerCommitsSamePartitionInOrderWhenUploadsFinishOutOfOrder(t *testing
 		t.Fatal("timed out waiting for runner to finish")
 	}
 
-	if len(source.commits) != 2 {
-		t.Fatalf("expected 2 commits, got %d", len(source.commits))
+	if len(source.commits) != 1 {
+		t.Fatalf("expected coalesced commit count 1, got %d", len(source.commits))
 	}
-	if got := source.commits[0].Records[0].Offset; got != 10 {
-		t.Fatalf("expected first commit offset 10, got %d", got)
-	}
-	if got := source.commits[1].Records[0].Offset; got != 11 {
-		t.Fatalf("expected second commit offset 11, got %d", got)
+	if got := source.commits[0].OffsetsByPart[0].EndOffset; got != 11 {
+		t.Fatalf("expected committed end offset 11, got %d", got)
 	}
 }
 
-func TestRunnerPropagatesSinkError(t *testing.T) {
+func TestRunnerDoesNotCommitOnUploadFailure(t *testing.T) {
 	source := &stubSource{
 		pollResults: [][]model.KafkaMessage{
 			{
@@ -359,6 +392,9 @@ func TestRunnerPropagatesSinkError(t *testing.T) {
 	err := runner.Run(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "sink exploded") {
 		t.Fatalf("expected sink error, got %v", err)
+	}
+	if len(source.commits) != 0 {
+		t.Fatalf("expected no commits after upload failure, got %d", len(source.commits))
 	}
 }
 
@@ -380,7 +416,7 @@ func newTestRunner(source coreSource, sink coreSink, mutate func(*config.Config)
 			MaxDuration: time.Minute,
 		},
 		Output: config.OutputConfig{
-			Format:      "parquet",
+			Format:      "avro",
 			Compression: "snappy",
 		},
 		Runtime: config.RuntimeConfig{

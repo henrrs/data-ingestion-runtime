@@ -1,0 +1,13 @@
+ok  	landing-connector/cmd/kafka-loadgen	(cached)
+?   	landing-connector/cmd/landing-connector	[no test files]
+?   	landing-connector/internal/adapters/sink/adls	[no test files]
+ok  	landing-connector/internal/adapters/sink/avroutil	(cached)
+ok  	landing-connector/internal/adapters/sink/fileformat	(cached)
+?   	landing-connector/internal/adapters/sink/minio	[no test files]
+?   	landing-connector/internal/adapters/sink/pathing	[no test files]
+ok  	landing-connector/internal/adapters/source/kafka	(cached)
+ok  	landing-connector/internal/app	(cached)
+ok  	landing-connector/internal/batch	(cached)
+ok  	landing-connector/internal/config	(cached)
+?   	landing-connector/internal/core	[no test files]
+?   	landing-connector/internal/model	[no test files]

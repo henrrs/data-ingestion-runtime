@@ -1,0 +1,38 @@
+pipeline_id: orders-stress-snappy
+run_timeout: 45m
+source:
+  type: kafka
+sink:
+  type: minio
+kafka:
+  brokers:
+    - localhost:19092
+  topic: orders-stress-snappy-20260426T011313Z
+  consumer_group: orders-stress-cg-snappy-20260426T011313Z
+batch:
+  max_records: 10000
+  max_bytes: 104857600
+  max_duration: 10m
+minio:
+  endpoint: localhost:9000
+  access_key: minioadmin
+  secret_key: minioadmin
+  bucket: landing
+  base_path: source=kafka/topic=orders-stress-snappy-20260426T011313Z
+  use_ssl: false
+  force_path_style: true
+output:
+  format: avro
+  compression: snappy
+  include_headers: true
+  include_key: true
+  file_prefix: part
+runtime:
+  max_parallel_flushes: 4
+  max_parallel_encodes: 2
+  max_parallel_uploads: 2
+  flush_queue_size: 4
+  partition_queue_size: 8
+  temp_dir: .codex/avro-e2e-matrix-500k-20260426T005549Z/count=500000/flush=4-encode=2-upload=2/tmp
+  pprof_enabled: false
+  pprof_addr: 127.0.0.1:6060

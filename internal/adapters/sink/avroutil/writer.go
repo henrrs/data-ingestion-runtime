@@ -46,10 +46,14 @@ type avroLandingRecord struct {
 	PayloadRaw    []byte  `avro:"payload_raw"`
 }
 
-func WriteRecords(output io.Writer, records []model.LandingRecord, compression string) error {
+type StreamWriter struct {
+	encoder *ocf.Encoder
+}
+
+func NewStreamWriter(output io.Writer, compression string) (*StreamWriter, error) {
 	codec, err := toOCFCodec(compression)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	encoder, err := ocf.NewEncoderWithSchema(
@@ -60,20 +64,37 @@ func WriteRecords(output io.Writer, records []model.LandingRecord, compression s
 		ocf.WithBlockSize(avroOCFBlockSize),
 	)
 	if err != nil {
-		return fmt.Errorf("create avro writer: %w", err)
+		return nil, fmt.Errorf("create avro writer: %w", err)
 	}
 
-	for _, record := range records {
-		if err := encoder.Encode(toAvroRecord(record)); err != nil {
-			return fmt.Errorf("encode avro row: %w", err)
-		}
-	}
+	return &StreamWriter{encoder: encoder}, nil
+}
 
-	if err := encoder.Close(); err != nil {
+func (w *StreamWriter) WriteRecord(record model.LandingRecord) error {
+	if err := w.encoder.Encode(toAvroRecord(record)); err != nil {
+		return fmt.Errorf("encode avro row: %w", err)
+	}
+	return nil
+}
+
+func (w *StreamWriter) Close() error {
+	if err := w.encoder.Close(); err != nil {
 		return fmt.Errorf("flush avro writer: %w", err)
 	}
-
 	return nil
+}
+
+func WriteRecords(output io.Writer, records []model.LandingRecord, compression string) error {
+	writer, err := NewStreamWriter(output, compression)
+	if err != nil {
+		return err
+	}
+	for _, record := range records {
+		if err := writer.WriteRecord(record); err != nil {
+			return err
+		}
+	}
+	return writer.Close()
 }
 
 func toOCFCodec(compression string) (ocf.CodecName, error) {

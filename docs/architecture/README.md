@@ -11,6 +11,17 @@ Registrar decisoes que afetam:
 - formato da landing zone
 - padroes de modularizacao e ownership
 
+## Principio Atual Da Landing Zone
+
+A Landing Zone deste repositorio deve permanecer:
+
+- raw e append-only
+- imutavel e fiel ao Kafka
+- barata de escrever
+- livre de deduplicacao e parsing analitico pesado
+
+A etapa de Bronze/Delta vem depois e nao deve ser empurrada para o runtime Go.
+
 ## Estrategia de documentacao
 
 Usaremos tres niveis de documentacao:
@@ -26,7 +37,7 @@ Usaremos tres niveis de documentacao:
 - [performance-analysis.md](performance-analysis.md)
 - [implementation-plan-performance.md](implementation-plan-performance.md)
 - [decisions/0001-hexagonal-architecture.md](decisions/0001-hexagonal-architecture.md)
-- [decisions/0002-landing-parquet-raw-payload.md](decisions/0002-landing-parquet-raw-payload.md)
+- [decisions/0002-landing-avro-raw-payload.md](decisions/0002-landing-avro-raw-payload.md)
 - [decisions/0003-batch-scale-to-zero.md](decisions/0003-batch-scale-to-zero.md)
 - [extension-guide.md](extension-guide.md)
 

@@ -10,41 +10,13 @@ import (
 	"landing-connector/internal/model"
 )
 
-func TestWriteRecordsToTempFileParquet(t *testing.T) {
-	t.Parallel()
-
-	file, size, err := WriteRecordsToTempFile(sampleRecords(), config.OutputConfig{
-		Format:      "parquet",
-		Compression: "zstd",
-	})
-	if err != nil {
-		t.Fatalf("write parquet temp output file: %v", err)
-	}
-	defer func() {
-		_ = file.Close()
-		_ = os.Remove(file.Name())
-	}()
-
-	if size <= 0 {
-		t.Fatalf("expected positive parquet size, got %d", size)
-	}
-
-	content, err := io.ReadAll(file)
-	if err != nil {
-		t.Fatalf("read temp parquet file: %v", err)
-	}
-	if int64(len(content)) != size {
-		t.Fatalf("expected read size %d, got %d", size, len(content))
-	}
-}
-
 func TestWriteRecordsToTempFileAvro(t *testing.T) {
 	t.Parallel()
 
 	file, size, err := WriteRecordsToTempFile(sampleRecords(), config.OutputConfig{
 		Format:      "avro",
 		Compression: "snappy",
-	})
+	}, "")
 	if err != nil {
 		t.Fatalf("write avro temp output file: %v", err)
 	}
@@ -76,5 +48,31 @@ func sampleRecords() []model.LandingRecord {
 			Offset:        1,
 			PayloadRaw:    []byte(`{"id":1}`),
 		},
+	}
+}
+
+func TestTempFileWriterAbortRemovesFile(t *testing.T) {
+	t.Parallel()
+
+	writer, err := NewTempFileWriter(config.OutputConfig{
+		Format:      "avro",
+		Compression: "snappy",
+	}, "")
+	if err != nil {
+		t.Fatalf("create temp writer: %v", err)
+	}
+
+	record := sampleRecords()[0]
+	if err := writer.AppendRecord(record); err != nil {
+		t.Fatalf("append record: %v", err)
+	}
+
+	tempWriter := writer.(*tempFileWriter)
+	fileName := tempWriter.file.Name()
+	if err := writer.Abort(); err != nil {
+		t.Fatalf("abort writer: %v", err)
+	}
+	if _, err := os.Stat(fileName); !os.IsNotExist(err) {
+		t.Fatalf("expected temp file to be removed, got %v", err)
 	}
 }

@@ -1,0 +1,3 @@
+event_count,format,compression,producer_elapsed_sec,producer_maxrss_kb,connector_elapsed_sec,connector_maxrss_kb,lag,objects,size_bytes,free_kb_after_cleanup,scenario_dir
+10000,parquet,snappy,3.60,43752,3.43,119776,0,6,40270479,53453140,/home/henrique/Documents/data-ingestion-runtime/.codex/baseline-e2e-20260425T225304Z/10000/parquet
+10000,avro,snappy,1.39,42724,3.40,173784,0,6,42091172,53453096,/home/henrique/Documents/data-ingestion-runtime/.codex/baseline-e2e-20260425T225304Z/10000/avro

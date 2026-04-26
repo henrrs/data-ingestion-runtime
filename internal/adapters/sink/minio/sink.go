@@ -50,7 +50,7 @@ func New(ctx context.Context, cfg config.Config) (*Sink, error) {
 }
 
 func (s *Sink) UploadWindowFile(ctx context.Context, window model.BatchWindow, file *os.File, size int64) (string, error) {
-	if len(window.Records) == 0 {
+	if window.RecordCount == 0 {
 		return "", nil
 	}
 

@@ -1,12 +1,24 @@
 # Landing Connector
 
-Conector batch para consumir dados de um topico Kafka e gravar arquivos Parquet ou Avro em uma landing zone object storage.
+Conector batch para consumir dados de um topico Kafka e gravar arquivos raw append-only em uma landing zone object storage.
 
-## Caracteristicas do MVP
+## Papel Da Landing Zone
+
+A Landing Zone deste runtime funciona como uma camada raw, imutavel e WAL-like:
+
+- captura o dado do Kafka o mais fiel possivel
+- nao faz deduplicacao
+- nao faz parsing pesado do payload
+- nao faz transformacao semantica para modelo analitico
+- so comita offsets depois de persistir o arquivo com sucesso
+
+A materializacao para Bronze/Delta deve acontecer depois, fora deste caminho quente.
+
+## Caracteristicas
 
 - Consumo Kafka com commit manual
 - Batch limitado por tempo, quantidade de registros e bytes aproximados
-- Escrita em Parquet ou Avro com payload bruto preservado
+- Escrita em Avro OCF com payload bruto preservado
 - Colunas tecnicas do Kafka para auditoria e replay
 - Manifest simplificado em logs estruturados
 - Preparado para execucao em `Kubernetes CronJob`
@@ -36,16 +48,24 @@ Para teste local com MinIO, veja [configs/orders.minio.example.yaml](configs/ord
 Para ambiente local de integracao, veja [deploy/docker-compose.local.yml](deploy/docker-compose.local.yml).
 Ao subir o ambiente local, o Redpanda Console fica em `http://localhost:8080` e o MinIO Console em `http://localhost:9001`.
 
+## Recomendacao De Formato
+
+- `avro` e o formato operacional padrao da landing raw
+- o runtime foi simplificado para um unico write path, com foco em throughput, menor RSS e menor pressao de GC
+- a Bronze/Delta deve ser materializada em uma etapa posterior, fora deste runtime
+
 Os knobs principais de throughput ficam em `runtime`:
 
-- `max_parallel_encodes`: paralelismo da etapa de serializacao para arquivo temporario
+- `max_parallel_flushes`: numero maximo de batches em voo entre fechamento da janela, upload e commit
+- `max_parallel_encodes`: limite de concorrencia da etapa de encode local no caminho quente
 - `max_parallel_uploads`: paralelismo da etapa de envio ao sink
-- `flush_queue_size`: buffer entre `assemble -> encode -> upload`
+- `flush_queue_size`: buffer entre fechamento da janela e upload
 - `partition_queue_size`: buffer de entrada por particao antes de aplicar backpressure
+- `temp_dir`: diretorio dos arquivos temporarios usados antes do upload
 
 ## Arquitetura
 
 As decisoes arquiteturais ficam documentadas em [docs/architecture/README.md](docs/architecture/README.md).
 O baseline mais recente de performance fica em [docs/architecture/performance-analysis.md](docs/architecture/performance-analysis.md).
 O plano de implementacao das otimizacoes fica em [docs/architecture/implementation-plan-performance.md](docs/architecture/implementation-plan-performance.md).
-Para rodar comparativos locais de compressao, use [scripts/bench/run-local-compression-matrix.sh](scripts/bench/run-local-compression-matrix.sh).
+Para rodar comparativos locais do write path Avro, use [scripts/bench/run-local-compression-matrix.sh](scripts/bench/run-local-compression-matrix.sh) e [scripts/bench/run-avro-e2e-matrix.sh](scripts/bench/run-avro-e2e-matrix.sh).

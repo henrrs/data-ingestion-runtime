@@ -1,9 +1,11 @@
 package batch
 
 import (
-	"bytes"
+	"os"
 	"testing"
 	"time"
+
+	"github.com/hamba/avro/v2/ocf"
 
 	"landing-connector/internal/config"
 	"landing-connector/internal/model"
@@ -14,56 +16,103 @@ func TestAssemblerTracksOffsets(t *testing.T) {
 		MaxRecords:  10,
 		MaxBytes:    1024,
 		MaxDuration: time.Minute,
-	}, "run-1", time.Now().UTC())
+	}, config.OutputConfig{
+		Format:      "avro",
+		Compression: "snappy",
+	}, "", "run-1", time.Now().UTC())
+	defer func() { _ = assembler.Abort() }()
 
 	messages := []model.KafkaMessage{
-		{Topic: "orders", Partition: 0, Offset: 100, Value: []byte(`{"id":1}`)},
-		{Topic: "orders", Partition: 0, Offset: 101, Value: []byte(`{"id":2}`)},
+		{Topic: "orders", Partition: 0, Offset: 100, IngestionTime: time.Now().UTC(), Value: []byte(`{"id":1}`)},
+		{Topic: "orders", Partition: 0, Offset: 101, IngestionTime: time.Now().UTC(), Value: []byte(`{"id":2}`)},
 	}
 
 	for _, msg := range messages {
-		if err := assembler.Add(msg, false, false); err != nil {
+		if err := assembler.Add(msg); err != nil {
 			t.Fatalf("add message: %v", err)
 		}
 	}
 
-	window := assembler.Window(time.Now().UTC())
-	offsets := window.OffsetsByPart[0]
+	prepared, err := assembler.Window(time.Now().UTC())
+	if err != nil {
+		t.Fatalf("prepare window: %v", err)
+	}
+	defer func() {
+		_ = prepared.File.Close()
+		_ = os.Remove(prepared.File.Name())
+	}()
+
+	offsets := prepared.Window.OffsetsByPart[0]
 	if offsets.StartOffset != 100 || offsets.EndOffset != 101 || offsets.RecordCount != 2 {
 		t.Fatalf("unexpected offsets: %+v", offsets)
 	}
+	if prepared.Window.RecordCount != 2 {
+		t.Fatalf("expected record_count=2, got %d", prepared.Window.RecordCount)
+	}
+	if prepared.Window.Topic != "orders" {
+		t.Fatalf("expected topic=orders, got %q", prepared.Window.Topic)
+	}
 }
 
-func TestAssemblerCopiesPayloadAndKeyBuffers(t *testing.T) {
+func TestAssemblerStreamsRecordDataImmediately(t *testing.T) {
 	assembler := NewAssembler(config.BatchConfig{
 		MaxRecords:  10,
 		MaxBytes:    1024,
 		MaxDuration: time.Minute,
-	}, "run-1", time.Now().UTC())
+	}, config.OutputConfig{
+		Format:      "avro",
+		Compression: "snappy",
+		IncludeKey:  true,
+	}, "", "run-1", time.Now().UTC())
+	defer func() { _ = assembler.Abort() }()
 
 	key := []byte("key-1")
 	payload := []byte(`{"id":1}`)
 	msg := model.KafkaMessage{
-		Topic:     "orders",
-		Partition: 0,
-		Offset:    100,
-		Key:       key,
-		Value:     payload,
+		Topic:         "orders",
+		Partition:     0,
+		Offset:        100,
+		IngestionTime: time.Date(2026, time.April, 25, 22, 0, 0, 0, time.UTC),
+		Key:           key,
+		Value:         payload,
 	}
 
-	if err := assembler.Add(msg, true, false); err != nil {
+	if err := assembler.Add(msg); err != nil {
 		t.Fatalf("add message: %v", err)
 	}
 
 	key[0] = 'X'
 	payload[0] = 'X'
 
-	window := assembler.Window(time.Now().UTC())
-	record := window.Records[0]
-	if !bytes.Equal(record.KeyRaw, []byte("key-1")) {
-		t.Fatalf("expected copied key, got %q", string(record.KeyRaw))
+	prepared, err := assembler.Window(time.Now().UTC())
+	if err != nil {
+		t.Fatalf("prepare window: %v", err)
 	}
-	if !bytes.Equal(record.PayloadRaw, []byte(`{"id":1}`)) {
-		t.Fatalf("expected copied payload, got %q", string(record.PayloadRaw))
+	defer func() {
+		_ = prepared.File.Close()
+		_ = os.Remove(prepared.File.Name())
+	}()
+
+	decoder, err := ocf.NewDecoder(prepared.File)
+	if err != nil {
+		t.Fatalf("create avro decoder: %v", err)
+	}
+	if !decoder.HasNext() {
+		t.Fatal("expected avro file to contain one record")
+	}
+
+	var got struct {
+		KeyRaw     []byte `avro:"key_raw"`
+		PayloadRaw []byte `avro:"payload_raw"`
+	}
+	if err := decoder.Decode(&got); err != nil {
+		t.Fatalf("decode avro record: %v", err)
+	}
+
+	if string(got.KeyRaw) != "key-1" {
+		t.Fatalf("expected encoded key to be stable, got %q", string(got.KeyRaw))
+	}
+	if string(got.PayloadRaw) != `{"id":1}` {
+		t.Fatalf("expected encoded payload to be stable, got %q", string(got.PayloadRaw))
 	}
 }

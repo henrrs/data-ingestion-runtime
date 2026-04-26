@@ -14,7 +14,7 @@ import (
 func BuildSource(cfg config.Config) (Source, error) {
 	switch strings.ToLower(cfg.Source.Type) {
 	case "", "kafka":
-		return kafka.NewSource(cfg.Kafka)
+		return kafka.NewSource(cfg.Kafka, cfg.Output.IncludeHeaders)
 	default:
 		return nil, fmt.Errorf("unsupported source type: %s", cfg.Source.Type)
 	}

@@ -10,8 +10,8 @@ O conector:
 2. faz `poll` em blocos
 3. roteia mensagens para workers por particao
 4. cada worker monta a janela de batch
-5. cada mensagem e codificada incrementalmente em Avro OCF para um arquivo temporario
-6. quando a janela fecha, o arquivo e enviado ao sink
+5. cada mensagem e codificada incrementalmente em Avro OCF para um stream em memoria (`io.Pipe`)
+6. o stream e enviado diretamente ao sink (sem arquivo temporario local)
 7. o commit ocorre somente depois do upload bem-sucedido
 
 ## Diagrama
@@ -23,8 +23,8 @@ flowchart LR
     C --> D["Partition Worker"]
     D --> E["Batch Assembler"]
     E --> F["Avro Stream Writer"]
-    F --> G["Temp File"]
-    G --> H["Sink Upload Worker"]
+    F --> G["Streaming Pipe"]
+    G --> H["Sink Upload"]
     H --> I["MinIO / ADLS"]
     I --> J["Commit Coordinator"]
     J --> K["Kafka Offset Commit"]
@@ -55,12 +55,19 @@ flowchart LR
 O conector registra por janela:
 
 - `records`
-- `bytes_approx`
+- `approx_input_bytes`
+- `stream_size`
 - `records_per_sec`
 - `bytes_per_sec`
-- `assembly_duration`
+- `encode_duration`
 - `upload_duration`
+- `commit_duration`
+- `total_batch_duration`
 - `time_to_commit`
+- `format`
+- `compression`
+- `upload_mode`
+- `file_path`
 
 Ao final da execucao ele tambem registra:
 
@@ -72,7 +79,3 @@ Ao final da execucao ele tambem registra:
 - `alloc_rate_bytes_per_sec`
 - `gc_cycles`
 - `gc_pause_total_ns`
-
-## Limitacao Atual
-
-O arquivo ainda e materializado localmente antes do upload. Isso continua sendo o desenho mais seguro porque o path final depende da faixa de offsets da janela. Um upload streaming direto para o nome final exigiria mudar a semantica de nomeacao ou adicionar renomeacao/copia remota.

@@ -29,6 +29,18 @@ func NewSource(cfg config.KafkaConfig, includeHeaders bool) (*Source, error) {
 		kgo.DisableAutoCommit(),
 	}
 
+	if cfg.FetchMaxBytes > 0 {
+		opts = append(opts, kgo.FetchMaxBytes(cfg.FetchMaxBytes))
+	}
+	if cfg.FetchMaxPartitionBytes > 0 {
+		opts = append(opts, kgo.FetchMaxPartitionBytes(cfg.FetchMaxPartitionBytes))
+	}
+	if cfg.FetchMinBytes > 0 {
+		opts = append(opts, kgo.FetchMinBytes(cfg.FetchMinBytes))
+	}
+	if cfg.FetchMaxWait > 0 {
+		opts = append(opts, kgo.FetchMaxWait(cfg.FetchMaxWait))
+	}
 	if cfg.ClientID != "" {
 		opts = append(opts, kgo.ClientID(cfg.ClientID))
 	}
@@ -123,9 +135,13 @@ var timeNowUTC = func() time.Time {
 	return time.Now().UTC()
 }
 
+var emptyHeadersJSON = []byte("{}")
+
+const lowerHexDigits = "0123456789abcdef"
+
 func marshalHeadersJSON(headers []kgo.RecordHeader) []byte {
 	if len(headers) == 0 {
-		return []byte("{}")
+		return emptyHeadersJSON
 	}
 
 	var buffer bytes.Buffer
@@ -137,7 +153,7 @@ func marshalHeadersJSON(headers []kgo.RecordHeader) []byte {
 		}
 		writeJSONString(&buffer, header.Key)
 		buffer.WriteByte(':')
-		writeJSONString(&buffer, string(header.Value))
+		writeJSONBytes(&buffer, header.Value)
 	}
 	buffer.WriteByte('}')
 	return buffer.Bytes()
@@ -162,11 +178,45 @@ func writeJSONString(buffer *bytes.Buffer, value string) {
 			buffer.WriteString(`\t`)
 		default:
 			if r < 0x20 {
-				fmt.Fprintf(buffer, "\\u%04x", r)
+				writeJSONControlEscape(buffer, byte(r))
 				continue
 			}
 			buffer.WriteRune(r)
 		}
 	}
 	buffer.WriteByte('"')
+}
+
+func writeJSONBytes(buffer *bytes.Buffer, value []byte) {
+	buffer.WriteByte('"')
+	for _, b := range value {
+		switch b {
+		case '\\', '"':
+			buffer.WriteByte('\\')
+			buffer.WriteByte(b)
+		case '\b':
+			buffer.WriteString(`\b`)
+		case '\f':
+			buffer.WriteString(`\f`)
+		case '\n':
+			buffer.WriteString(`\n`)
+		case '\r':
+			buffer.WriteString(`\r`)
+		case '\t':
+			buffer.WriteString(`\t`)
+		default:
+			if b < 0x20 {
+				writeJSONControlEscape(buffer, b)
+				continue
+			}
+			buffer.WriteByte(b)
+		}
+	}
+	buffer.WriteByte('"')
+}
+
+func writeJSONControlEscape(buffer *bytes.Buffer, b byte) {
+	buffer.WriteString(`\u00`)
+	buffer.WriteByte(lowerHexDigits[b>>4])
+	buffer.WriteByte(lowerHexDigits[b&0x0f])
 }

@@ -14,8 +14,9 @@ PAYLOAD_MODE="${PAYLOAD_MODE:-pseudo-random}"
 RANDOM_SEED="${RANDOM_SEED:-20260419}"
 BATCH_SIZE="${BATCH_SIZE:-1000}"
 REPORT_EVERY="${REPORT_EVERY:-100000}"
-COMPRESSIONS="${COMPRESSIONS:-snappy}"
+COMPRESSIONS="${COMPRESSIONS:-null}"
 OUTPUT_FORMAT="${OUTPUT_FORMAT:-avro}"
+UPLOAD_MODE="${UPLOAD_MODE:-streaming}"
 PIPELINE_ID="${PIPELINE_ID:-orders-stress}"
 CONSUMER_GROUP_PREFIX="${CONSUMER_GROUP_PREFIX:-orders-stress-cg}"
 TOPIC_PREFIX="${TOPIC_PREFIX:-orders-stress}"
@@ -24,12 +25,15 @@ MINIO_ENDPOINT="${MINIO_ENDPOINT:-localhost:9000}"
 MINIO_ACCESS_KEY="${MINIO_ACCESS_KEY:-minioadmin}"
 MINIO_SECRET_KEY="${MINIO_SECRET_KEY:-minioadmin}"
 MINIO_BASE_PATH_PREFIX="${MINIO_BASE_PATH_PREFIX:-source=kafka}"
+MINIO_MULTIPART_PART_SIZE_MIB="${MINIO_MULTIPART_PART_SIZE_MIB:-16}"
 FLUSH_WORKERS="${FLUSH_WORKERS:-2}"
 ENCODE_WORKERS="${ENCODE_WORKERS:-$FLUSH_WORKERS}"
 UPLOAD_WORKERS="${UPLOAD_WORKERS:-$FLUSH_WORKERS}"
 PARTITION_QUEUE_SIZE="${PARTITION_QUEUE_SIZE:-4}"
 FLUSH_QUEUE_SIZE="${FLUSH_QUEUE_SIZE:-0}"
 TEMP_DIR="${TEMP_DIR:-$OUTPUT_DIR/tmp}"
+IDLE_POLL_TIMEOUT="${IDLE_POLL_TIMEOUT:-2s}"
+IDLE_POLL_COUNT="${IDLE_POLL_COUNT:-15}"
 RUN_TIMEOUT="${RUN_TIMEOUT:-30m}"
 KEEP_TOPICS="${KEEP_TOPICS:-false}"
 BATCH_MAX_RECORDS="${BATCH_MAX_RECORDS:-10000}"
@@ -37,6 +41,13 @@ BATCH_MAX_BYTES="${BATCH_MAX_BYTES:-104857600}"
 BATCH_MAX_DURATION="${BATCH_MAX_DURATION:-10m}"
 INCLUDE_HEADERS="${INCLUDE_HEADERS:-true}"
 INCLUDE_KEY="${INCLUDE_KEY:-true}"
+KAFKA_POLL_RECORDS="${KAFKA_POLL_RECORDS:-1000}"
+KAFKA_FETCH_MAX_BYTES="${KAFKA_FETCH_MAX_BYTES:-0}"
+KAFKA_FETCH_MAX_PARTITION_BYTES="${KAFKA_FETCH_MAX_PARTITION_BYTES:-0}"
+KAFKA_FETCH_MIN_BYTES="${KAFKA_FETCH_MIN_BYTES:-0}"
+KAFKA_FETCH_MAX_WAIT="${KAFKA_FETCH_MAX_WAIT:-0s}"
+GODEBUG_VALUE="${GODEBUG_VALUE:-}"
+TIME_VERBOSE="${TIME_VERBOSE:-false}"
 
 if [[ "$FLUSH_QUEUE_SIZE" == "0" ]]; then
   if (( ENCODE_WORKERS > UPLOAD_WORKERS )); then
@@ -85,6 +96,11 @@ kafka:
     - ${BROKERS}
   topic: ${topic}
   consumer_group: ${consumer_group}
+  poll_records: ${KAFKA_POLL_RECORDS}
+  fetch_max_bytes: ${KAFKA_FETCH_MAX_BYTES}
+  fetch_max_partition_bytes: ${KAFKA_FETCH_MAX_PARTITION_BYTES}
+  fetch_min_bytes: ${KAFKA_FETCH_MIN_BYTES}
+  fetch_max_wait: ${KAFKA_FETCH_MAX_WAIT}
 batch:
   max_records: ${BATCH_MAX_RECORDS}
   max_bytes: ${BATCH_MAX_BYTES}
@@ -97,9 +113,11 @@ minio:
   base_path: ${MINIO_BASE_PATH_PREFIX}/topic=${topic}
   use_ssl: false
   force_path_style: true
+  multipart_part_size_mib: ${MINIO_MULTIPART_PART_SIZE_MIB}
 output:
   format: ${OUTPUT_FORMAT}
-  compression: ${compression}
+  compression: "${compression}"
+  upload_mode: ${UPLOAD_MODE}
   include_headers: ${INCLUDE_HEADERS}
   include_key: ${INCLUDE_KEY}
   file_prefix: part
@@ -110,6 +128,8 @@ runtime:
   flush_queue_size: ${FLUSH_QUEUE_SIZE}
   partition_queue_size: ${PARTITION_QUEUE_SIZE}
   temp_dir: ${TEMP_DIR}
+  idle_poll_timeout: ${IDLE_POLL_TIMEOUT}
+  idle_poll_count: ${IDLE_POLL_COUNT}
   pprof_enabled: false
   pprof_addr: 127.0.0.1:6060
 EOF
@@ -130,10 +150,31 @@ EOF
       -report-every "$REPORT_EVERY" \
       >"$OUTPUT_DIR/${compression}.producer.log" 2>&1
 
-  /usr/bin/time -f "connector_elapsed_sec=%e connector_maxrss_kb=%M" \
-    -o "$OUTPUT_DIR/${compression}.connector.time" \
-    go run ./cmd/landing-connector -config "$config_file" \
-    >"$OUTPUT_DIR/${compression}.connector.log" 2>&1
+  if [[ "$TIME_VERBOSE" == "true" ]]; then
+    env GODEBUG="$GODEBUG_VALUE" /usr/bin/time -v \
+      -o "$OUTPUT_DIR/${compression}.connector.time.verbose" \
+      go run ./cmd/landing-connector -config "$config_file" \
+      >"$OUTPUT_DIR/${compression}.connector.log" 2>&1
+    python3 - "$OUTPUT_DIR/${compression}.connector.time.verbose" >"$OUTPUT_DIR/${compression}.connector.time" <<'PY'
+import re
+import sys
+
+content = open(sys.argv[1], "r", encoding="utf-8").read()
+elapsed = re.search(r"Elapsed \(wall clock\) time .*: (?:(\d+):)?(\d+):(\d+(?:\.\d+)?)", content)
+rss = re.search(r"Maximum resident set size \(kbytes\): (\d+)", content)
+if not elapsed or not rss:
+    raise SystemExit("unable to parse verbose time output")
+hours = int(elapsed.group(1) or 0)
+minutes = int(elapsed.group(2))
+seconds = float(elapsed.group(3))
+print(f"connector_elapsed_sec={hours*3600 + minutes*60 + seconds:.2f} connector_maxrss_kb={rss.group(1)}")
+PY
+  else
+    env GODEBUG="$GODEBUG_VALUE" /usr/bin/time -f "connector_elapsed_sec=%e connector_maxrss_kb=%M" \
+      -o "$OUTPUT_DIR/${compression}.connector.time" \
+      go run ./cmd/landing-connector -config "$config_file" \
+      >"$OUTPUT_DIR/${compression}.connector.log" 2>&1
+  fi
 
   if [[ "$KEEP_TOPICS" != "true" ]]; then
     docker-compose -f "$COMPOSE_FILE" exec -T redpanda rpk topic delete "$topic" >/dev/null 2>&1 || {

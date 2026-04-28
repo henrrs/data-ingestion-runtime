@@ -242,6 +242,53 @@ Portanto:
 - o numero oficial considerado e o rerun
 - a primeira execucao foi tratada como anomalia de benchmark
 
+## Atualizacao 2026-04-27: Streaming MinIO com multipart ajustado
+
+### Alteracao aplicada
+
+Para estabilizar o caminho oficial `avro + compression: null + upload_mode: streaming`, foi ajustado o upload multipart do MinIO:
+
+- novo parametro `minio.multipart_part_size_mib` com default `16`
+- uso explicito de `PartSize` no `PutObject` do MinIO
+- uso de `NumThreads: 1` no upload streaming para reduzir pressao de memoria
+
+Arquivos principais:
+
+- `internal/adapters/sink/minio/sink.go`
+- `internal/config/config.go`
+- `internal/config/config_test.go`
+- `configs/orders.minio.example.yaml`
+
+### Motivo tecnico
+
+Sem controle do tamanho de parte no multipart streaming, o caminho de upload pode aumentar buffering interno e causar backpressure excessivo no host local (8 GB RAM).  
+Com parte fixa de `16 MiB`, o uso de memoria fica mais previsivel e o fluxo `encode -> upload -> commit` estabiliza para cargas maiores.
+
+### Ganho observado (comparacao direta)
+
+Comparacao entre:
+
+- referencia anterior: `snappy + 2:2:2`
+- nova configuracao: `null + streaming + multipart_part_size_mib=16 + 2:2:2`
+- mesma carga: payload pseudoaleatorio de `8 KiB`, `6` particoes, `include_headers=true`, `include_key=true`
+
+| Carga | Antes (snappy) | Depois (null+streaming part16) | Delta |
+| --- | --- | --- | --- |
+| `100k` | `39.03s`, `2562 rec/s`, RSS `597260 KB` | `46.55s`, `2148 rec/s`, RSS `690752 KB` | tempo `+19.3%` (pior), throughput `-16.2%`, RSS `+15.7%` |
+| `300k` | `171.46s`, `1749 rec/s`, RSS `603704 KB` | `119.89s`, `2502 rec/s`, RSS `748244 KB` | tempo `-30.1%`, throughput `+43.0%`, RSS `+23.9%` |
+| `500k` | `335.47s`, `1490 rec/s`, RSS `623144 KB` | `206.20s`, `2425 rec/s`, RSS `800452 KB` | tempo `-38.5%`, throughput `+62.7%`, RSS `+28.4%` |
+
+### Leitura objetiva do resultado
+
+- para cargas longas (`300k` e `500k`), o novo caminho trouxe ganho forte de tempo e throughput, e completou com `lag=0`
+- para carga curta (`100k`), houve regressao de tempo, mas este cenario nao representa o alvo operacional principal
+- no `500k`, o tamanho final entre `snappy` e `null` ficou praticamente igual (diferenca de ~`0.07%`), reforcando que o `snappy` nao estava trazendo ganho real para payload pseudoaleatorio neste workload
+
+Conclusao desta alteracao:
+
+- o ajuste de multipart foi decisivo para estabilidade do `500k` em streaming
+- a combinacao `compression: null + streaming + multipart_part_size_mib=16 + 2:2:2` passa a ser o perfil recomendado para este ambiente local
+
 ### Pressao de memoria continua alta
 
 Mesmo depois das melhorias:

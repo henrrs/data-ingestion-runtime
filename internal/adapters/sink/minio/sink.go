@@ -3,6 +3,7 @@ package minio
 import (
 	"context"
 	"fmt"
+	"io"
 
 	minio "github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
@@ -10,7 +11,6 @@ import (
 	"landing-connector/internal/adapters/sink/pathing"
 	"landing-connector/internal/config"
 	"landing-connector/internal/model"
-	"os"
 )
 
 type Sink struct {
@@ -49,18 +49,17 @@ func New(ctx context.Context, cfg config.Config) (*Sink, error) {
 	}, nil
 }
 
-func (s *Sink) UploadWindowFile(ctx context.Context, window model.BatchWindow, file *os.File, size int64) (string, error) {
+func (s *Sink) UploadWindowStream(ctx context.Context, window model.BatchWindow, reader io.Reader) (string, error) {
 	if window.RecordCount == 0 {
 		return "", nil
 	}
 
 	objectPath := pathing.BuildFilePath(s.cfg.MinIO.BasePath, pathing.FilePrefix(s.cfg), window, s.cfg.Output.FileExtension())
-	if _, err := file.Seek(0, 0); err != nil {
-		return "", fmt.Errorf("rewind temp file for minio upload: %w", err)
-	}
-
-	_, err := s.client.PutObject(ctx, s.cfg.MinIO.Bucket, objectPath, file, size, minio.PutObjectOptions{
+	partSize := uint64(s.cfg.MinIO.MultipartPartSizeMiB) * 1024 * 1024
+	_, err := s.client.PutObject(ctx, s.cfg.MinIO.Bucket, objectPath, reader, -1, minio.PutObjectOptions{
 		ContentType: "application/octet-stream",
+		PartSize:    partSize,
+		NumThreads:  1,
 	})
 	if err != nil {
 		return "", fmt.Errorf("put minio object %s: %w", objectPath, err)

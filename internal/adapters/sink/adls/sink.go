@@ -3,7 +3,7 @@ package adls
 import (
 	"context"
 	"fmt"
-	"os"
+	"io"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
@@ -38,7 +38,7 @@ func New(_ context.Context, cfg config.Config) (*Sink, error) {
 	}, nil
 }
 
-func (s *Sink) UploadWindowFile(ctx context.Context, window model.BatchWindow, sourceFile *os.File, _ int64) (string, error) {
+func (s *Sink) UploadWindowStream(ctx context.Context, window model.BatchWindow, reader io.Reader) (string, error) {
 	if window.RecordCount == 0 {
 		return "", nil
 	}
@@ -49,11 +49,7 @@ func (s *Sink) UploadWindowFile(ctx context.Context, window model.BatchWindow, s
 		return "", fmt.Errorf("create adls file %s: %w", filePath, err)
 	}
 
-	if _, err := sourceFile.Seek(0, 0); err != nil {
-		return "", fmt.Errorf("rewind temp file for adls upload: %w", err)
-	}
-
-	if err := uploadFile(ctx, fileClient, sourceFile); err != nil {
+	if err := uploadFile(ctx, fileClient, reader); err != nil {
 		return "", fmt.Errorf("upload adls file %s: %w", filePath, err)
 	}
 
@@ -71,6 +67,6 @@ func buildCredential(spec config.CredentialSpec) (azcore.TokenCredential, error)
 	}
 }
 
-func uploadFile(ctx context.Context, fileClient *file.Client, source *os.File) error {
-	return fileClient.UploadFile(ctx, source, nil)
+func uploadFile(ctx context.Context, fileClient *file.Client, source io.Reader) error {
+	return fileClient.UploadStream(ctx, source, nil)
 }

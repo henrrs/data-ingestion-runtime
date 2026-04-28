@@ -61,7 +61,45 @@ Os knobs principais de throughput ficam em `runtime`:
 - `max_parallel_uploads`: paralelismo da etapa de envio ao sink
 - `flush_queue_size`: buffer entre fechamento da janela e upload
 - `partition_queue_size`: buffer de entrada por particao antes de aplicar backpressure
-- `temp_dir`: diretorio dos arquivos temporarios usados antes do upload
+- `execution_mode`: `auto|finite|continuous`
+- `drain_idle_poll_count`: limite de polls ociosos para encerrar run finito apos drenar backlog
+
+Auto-tuning operacional:
+
+- quando `poll_records`, `fetch_*`, `max_parallel_*`, `flush_queue_size` ou `partition_queue_size` estao em `0`, o runtime aplica defaults automaticos com base no perfil da maquina (CPU/RAM)
+- `execution_mode: auto` resolve para `finite` quando `run_timeout > 0` e para `continuous` quando `run_timeout = 0`
+- se um valor for informado explicitamente no YAML, ele sempre prevalece
+
+Para maquina local pequena, como 8 GB de RAM e SSD compartilhado com Redpanda e MinIO, o ponto operacional inicial recomendado e:
+
+```yaml
+runtime:
+  max_parallel_flushes: 2
+  max_parallel_encodes: 2
+  max_parallel_uploads: 2
+```
+
+Compressao:
+
+- `null`: default operacional do conector para landing raw, priorizando menor custo de CPU no caminho quente
+- `snappy`: opcao para cenarios onde o payload tenha compressibilidade real e o gargalo principal seja I/O
+
+Kafka:
+
+- `kafka.poll_records`: quantidade maxima de registros drenados por chamada de poll
+- `kafka.fetch_max_bytes`, `kafka.fetch_max_partition_bytes`, `kafka.fetch_min_bytes`, `kafka.fetch_max_wait`: knobs opcionais para ajustar fetch sem mudar a semantica de commit
+- usar `0` nesses campos habilita auto-tuning do perfil da maquina
+
+Upload:
+
+- `output.upload_mode: streaming` e o modo oficial suportado
+- o conector nao materializa arquivo temporario local antes do upload
+- o commit continua acontecendo somente apos upload concluido com sucesso
+- logs por batch incluem metricas separadas de upload:
+  - `upload_stream_open_duration`
+  - `upload_active_duration`
+  - `upload_wait_for_first_byte`
+  - `upload_tail_finalize_duration`
 
 ## Arquitetura
 

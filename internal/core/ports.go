@@ -2,7 +2,7 @@ package core
 
 import (
 	"context"
-	"os"
+	"io"
 
 	"landing-connector/internal/model"
 )
@@ -14,5 +14,5 @@ type Source interface {
 }
 
 type Sink interface {
-	UploadWindowFile(ctx context.Context, window model.BatchWindow, file *os.File, size int64) (string, error)
+	UploadWindowStream(ctx context.Context, window model.BatchWindow, reader io.Reader) (string, error)
 }

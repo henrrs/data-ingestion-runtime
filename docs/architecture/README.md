@@ -35,6 +35,7 @@ Usaremos tres niveis de documentacao:
 - [system-overview.md](system-overview.md)
 - [current-connector-flow.md](current-connector-flow.md)
 - [performance-analysis.md](performance-analysis.md)
+- [performance-deep-dive-2026-04-28.md](performance-deep-dive-2026-04-28.md)
 - [implementation-plan-performance.md](implementation-plan-performance.md)
 - [decisions/0001-hexagonal-architecture.md](decisions/0001-hexagonal-architecture.md)
 - [decisions/0002-landing-avro-raw-payload.md](decisions/0002-landing-avro-raw-payload.md)

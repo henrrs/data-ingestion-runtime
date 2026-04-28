@@ -1,38 +1,31 @@
 package batch
 
 import (
-	"fmt"
-	"os"
 	"time"
+	"unsafe"
 
-	"landing-connector/internal/adapters/sink/fileformat"
 	"landing-connector/internal/config"
 	"landing-connector/internal/model"
 )
 
 type PreparedWindow struct {
 	Window model.BatchWindow
-	File   *os.File
-	Size   int64
 }
 
 type Assembler struct {
-	cfg       config.BatchConfig
-	outputCfg config.OutputConfig
-	tempDir   string
-	runID     string
-	startedAt time.Time
-	window    model.BatchWindow
-	writer    fileformat.TempFileWriter
+	cfg     config.BatchConfig
+	output  config.OutputConfig
+	runID   string
+	started time.Time
+	window  model.BatchWindow
 }
 
-func NewAssembler(cfg config.BatchConfig, outputCfg config.OutputConfig, tempDir string, runID string, now time.Time) *Assembler {
+func NewAssembler(cfg config.BatchConfig, outputCfg config.OutputConfig, runID string, now time.Time) *Assembler {
 	return &Assembler{
-		cfg:       cfg,
-		outputCfg: outputCfg,
-		tempDir:   tempDir,
-		runID:     runID,
-		startedAt: now,
+		cfg:     cfg,
+		output:  outputCfg,
+		runID:   runID,
+		started: now,
 		window: model.BatchWindow{
 			RunID:         runID,
 			StartedAt:     now,
@@ -41,10 +34,10 @@ func NewAssembler(cfg config.BatchConfig, outputCfg config.OutputConfig, tempDir
 	}
 }
 
-func (a *Assembler) Add(msg model.KafkaMessage) error {
+func BuildLandingRecord(msg model.KafkaMessage, runID string, includeKey bool) model.LandingRecord {
 	record := model.LandingRecord{
 		IngestionTime: msg.IngestionTime,
-		RunID:         a.runID,
+		RunID:         runID,
 		Topic:         msg.Topic,
 		Partition:     msg.Partition,
 		Offset:        msg.Offset,
@@ -55,11 +48,12 @@ func (a *Assembler) Add(msg model.KafkaMessage) error {
 		eventTime := msg.EventTime.UTC().UnixMicro()
 		record.EventTime = &eventTime
 	}
-	if a.outputCfg.IncludeKey {
+	if includeKey {
 		record.KeyRaw = msg.Key
 	}
 	if len(msg.HeadersJSON) > 0 {
-		headers := string(msg.HeadersJSON)
+		// Safe because msg.HeadersJSON is produced per message and never mutated afterwards.
+		headers := bytesToImmutableString(msg.HeadersJSON)
 		record.HeadersJSON = &headers
 	}
 	if msg.SchemaID > 0 {
@@ -67,13 +61,17 @@ func (a *Assembler) Add(msg model.KafkaMessage) error {
 		record.SchemaID = &schemaID
 	}
 
-	if err := a.appendRecord(record); err != nil {
-		return err
-	}
+	return record
+}
 
+func (a *Assembler) Add(msg model.KafkaMessage) error {
 	a.window.Topic = msg.Topic
 	a.window.RecordCount++
-	a.window.BytesApprox += len(msg.Value) + len(record.KeyRaw) + len(msg.HeadersJSON)
+	approx := len(msg.Value) + len(msg.HeadersJSON)
+	if a.output.IncludeKey {
+		approx += len(msg.Key)
+	}
+	a.window.BytesApprox += approx
 
 	offsetRange := a.window.OffsetsByPart[msg.Partition]
 	if offsetRange.RecordCount == 0 {
@@ -95,7 +93,7 @@ func (a *Assembler) Add(msg model.KafkaMessage) error {
 func (a *Assembler) ShouldFlush(now time.Time) bool {
 	return a.window.RecordCount >= a.cfg.MaxRecords ||
 		a.window.BytesApprox >= a.cfg.MaxBytes ||
-		now.Sub(a.startedAt) >= a.cfg.MaxDuration
+		now.Sub(a.started) >= a.cfg.MaxDuration
 }
 
 func (a *Assembler) Window(now time.Time) (PreparedWindow, error) {
@@ -104,39 +102,22 @@ func (a *Assembler) Window(now time.Time) (PreparedWindow, error) {
 	}
 
 	a.window.EndedAt = now
-	file, size, err := a.writer.Close()
-	if err != nil {
-		return PreparedWindow{}, fmt.Errorf("close temp writer: %w", err)
-	}
-	a.writer = nil
-
 	return PreparedWindow{
 		Window: a.window,
-		File:   file,
-		Size:   size,
 	}, nil
 }
 
-func (a *Assembler) Abort() error {
-	if a.writer == nil {
-		return nil
-	}
-	err := a.writer.Abort()
-	a.writer = nil
-	return err
+func (a *Assembler) StartedAt() time.Time {
+	return a.started
 }
 
-func (a *Assembler) appendRecord(record model.LandingRecord) error {
-	if a.writer == nil {
-		writer, err := fileformat.NewTempFileWriter(a.outputCfg, a.tempDir)
-		if err != nil {
-			return fmt.Errorf("create temp writer: %w", err)
-		}
-		a.writer = writer
-	}
-
-	if err := a.writer.AppendRecord(record); err != nil {
-		return fmt.Errorf("append record to temp writer: %w", err)
-	}
+func (a *Assembler) Abort() error {
 	return nil
+}
+
+func bytesToImmutableString(value []byte) string {
+	if len(value) == 0 {
+		return ""
+	}
+	return unsafe.String(unsafe.SliceData(value), len(value))
 }

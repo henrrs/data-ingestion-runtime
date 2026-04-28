@@ -15,6 +15,12 @@ kafka:
   consumer_group: orders-landing-batch
   client_id: landing-connector
   commit_interval: 0s
+  # 0 = auto-tuned by host profile (CPU/RAM)
+  poll_records: 0
+  fetch_max_bytes: 0
+  fetch_max_partition_bytes: 0
+  fetch_min_bytes: 0
+  fetch_max_wait: 0s
   security:
     sasl_enabled: false
     tls_enabled: false
@@ -33,17 +39,25 @@ adls:
 
 output:
   format: avro
-  compression: snappy
+  compression: null
+  upload_mode: streaming
   include_headers: true
   include_key: true
   file_prefix: part
 
 runtime:
-  max_parallel_flushes: 4
-  max_parallel_encodes: 2
-  max_parallel_uploads: 2
-  flush_queue_size: 8
-  partition_queue_size: 8
+  # 0 = auto-tuned by host profile (CPU/RAM)
+  max_parallel_flushes: 0
+  max_parallel_encodes: 0
+  max_parallel_uploads: 0
+  flush_queue_size: 0
+  partition_queue_size: 0
   temp_dir: /tmp/landing-connector
+  # auto: finite quando run_timeout > 0, continuo quando run_timeout = 0
+  execution_mode: auto
+  # numero de polls ociosos apos backlog antes de encerrar em modo finito
+  drain_idle_poll_count: 2
+  idle_poll_timeout: 2s
+  idle_poll_count: 15
   pprof_enabled: false
   pprof_addr: 127.0.0.1:6060

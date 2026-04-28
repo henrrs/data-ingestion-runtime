@@ -3,7 +3,7 @@ package app
 import (
 	"context"
 	"errors"
-	"os"
+	"io"
 	"strings"
 	"sync"
 	"testing"
@@ -62,12 +62,17 @@ type stubSink struct {
 	mu            sync.Mutex
 	uploads       []model.BatchWindow
 	started       chan struct{}
+	copied        chan struct{}
 	releaseWrites chan struct{}
 }
 
-func (s *stubSink) UploadWindowFile(_ context.Context, window model.BatchWindow, _ *os.File, _ int64) (string, error) {
+func (s *stubSink) UploadWindowStream(_ context.Context, window model.BatchWindow, reader io.Reader) (string, error) {
 	if s.started != nil {
 		s.started <- struct{}{}
+	}
+	_, _ = io.Copy(io.Discard, reader)
+	if s.copied != nil {
+		s.copied <- struct{}{}
 	}
 	if s.releaseWrites != nil {
 		<-s.releaseWrites
@@ -180,6 +185,69 @@ func TestRunnerDoesNotStopOnFirstIdleTimeoutAfterSeeingMessages(t *testing.T) {
 	}
 }
 
+func TestRunnerFiniteModeUsesDrainIdlePollCountAfterSeeingMessages(t *testing.T) {
+	source := &stubSource{
+		pollResults: [][]model.KafkaMessage{
+			{
+				{Topic: "orders", Partition: 0, Offset: 10, Value: []byte(`{"id":10}`)},
+			},
+		},
+		pollErrors: []error{
+			nil,
+			context.DeadlineExceeded,
+			context.DeadlineExceeded,
+			context.DeadlineExceeded,
+		},
+	}
+
+	sink := &stubSink{}
+	runner := newTestRunner(source, sink, func(cfg *config.Config) {
+		cfg.Runtime.ExecutionMode = "finite"
+		cfg.Runtime.DrainIdlePollCount = 2
+	})
+
+	if err := runner.Run(context.Background()); err != nil {
+		t.Fatalf("run returned error: %v", err)
+	}
+
+	if got := source.pollCalls; got != 3 {
+		t.Fatalf("expected runner to stop after 2 drain idle polls, got poll calls %d", got)
+	}
+	if got := len(source.commits); got != 1 {
+		t.Fatalf("expected 1 commit, got %d", got)
+	}
+}
+
+func TestRunnerAutoModeWithoutRunTimeoutBehavesAsContinuous(t *testing.T) {
+	source := &stubSource{
+		pollErrors: []error{
+			context.DeadlineExceeded,
+			context.DeadlineExceeded,
+			context.DeadlineExceeded,
+			context.DeadlineExceeded,
+		},
+	}
+
+	sink := &stubSink{}
+	runner := newTestRunner(source, sink, func(cfg *config.Config) {
+		cfg.Runtime.ExecutionMode = "auto"
+		cfg.Runtime.DrainIdlePollCount = 1
+		cfg.Runtime.IdlePollTimeout = 10 * time.Millisecond
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
+	defer cancel()
+
+	err := runner.Run(ctx)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected context deadline exceeded in continuous mode, got %v", err)
+	}
+
+	if source.pollCalls < 2 {
+		t.Fatalf("expected multiple polls before context timeout, got %d", source.pollCalls)
+	}
+}
+
 func TestRunnerFlushesDifferentPartitionsConcurrently(t *testing.T) {
 	source := &stubSource{
 		pollResults: [][]model.KafkaMessage{
@@ -192,9 +260,11 @@ func TestRunnerFlushesDifferentPartitionsConcurrently(t *testing.T) {
 	}
 
 	started := make(chan struct{}, 2)
+	copied := make(chan struct{}, 2)
 	releaseWrites := make(chan struct{})
 	sink := &stubSink{
 		started:       started,
+		copied:        copied,
 		releaseWrites: releaseWrites,
 	}
 	runner := newTestRunner(source, sink, func(cfg *config.Config) {
@@ -249,9 +319,11 @@ func TestRunnerAppliesMaxParallelFlushes(t *testing.T) {
 	}
 
 	started := make(chan struct{}, 2)
+	copied := make(chan struct{}, 2)
 	releaseWrites := make(chan struct{})
 	sink := &stubSink{
 		started:       started,
+		copied:        copied,
 		releaseWrites: releaseWrites,
 	}
 	runner := newTestRunner(source, sink, func(cfg *config.Config) {
@@ -275,7 +347,19 @@ func TestRunnerAppliesMaxParallelFlushes(t *testing.T) {
 
 	select {
 	case <-started:
-		t.Fatal("expected second upload to be blocked by max_parallel_flushes")
+	case <-time.After(150 * time.Millisecond):
+		t.Fatal("timed out waiting for second upload to start")
+	}
+
+	select {
+	case <-copied:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for first upload stream to drain")
+	}
+
+	select {
+	case <-copied:
+		t.Fatal("expected second upload stream to remain blocked by max_parallel_flushes")
 	case <-time.After(150 * time.Millisecond):
 	}
 
@@ -291,17 +375,92 @@ func TestRunnerAppliesMaxParallelFlushes(t *testing.T) {
 	}
 }
 
+func TestRunnerAppliesMaxParallelUploads(t *testing.T) {
+	source := &stubSource{
+		pollResults: [][]model.KafkaMessage{
+			{
+				{Topic: "orders", Partition: 0, Offset: 10, Value: []byte(`{"id":10}`)},
+				{Topic: "orders", Partition: 1, Offset: 20, Value: []byte(`{"id":20}`)},
+			},
+		},
+		pollErrors: []error{nil, context.DeadlineExceeded},
+	}
+
+	started := make(chan struct{}, 2)
+	copied := make(chan struct{}, 2)
+	releaseWrites := make(chan struct{})
+	sink := &stubSink{
+		started:       started,
+		copied:        copied,
+		releaseWrites: releaseWrites,
+	}
+
+	runner := newTestRunner(source, sink, func(cfg *config.Config) {
+		cfg.Batch.MaxRecords = 1
+		cfg.Runtime.MaxParallelFlushes = 2
+		cfg.Runtime.MaxParallelEncodes = 2
+		cfg.Runtime.MaxParallelUploads = 1
+		cfg.Runtime.FlushQueueSize = 2
+		cfg.Runtime.PartitionQueueSize = 2
+	})
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- runner.Run(context.Background())
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for first upload to start")
+	}
+
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for second upload to start")
+	}
+
+	select {
+	case <-copied:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for first upload stream to drain")
+	}
+
+	select {
+	case <-copied:
+		t.Fatal("expected second upload stream to remain blocked by max_parallel_uploads")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	close(releaseWrites)
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("run returned error: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for runner to finish")
+	}
+
+	if got := len(source.commits); got != 2 {
+		t.Fatalf("expected 2 commits, got %d", got)
+	}
+}
+
 type outOfOrderSink struct {
 	mu           sync.Mutex
 	started      chan int64
 	releaseFirst chan struct{}
 }
 
-func (s *outOfOrderSink) UploadWindowFile(_ context.Context, window model.BatchWindow, _ *os.File, _ int64) (string, error) {
+func (s *outOfOrderSink) UploadWindowStream(_ context.Context, window model.BatchWindow, reader io.Reader) (string, error) {
 	offset := window.OffsetsByPart[0].StartOffset
 	if s.started != nil {
 		s.started <- offset
 	}
+	_, _ = io.Copy(io.Discard, reader)
 	if offset == 10 {
 		<-s.releaseFirst
 	}
@@ -402,7 +561,8 @@ type failingSink struct {
 	err error
 }
 
-func (s *failingSink) UploadWindowFile(_ context.Context, _ model.BatchWindow, _ *os.File, _ int64) (string, error) {
+func (s *failingSink) UploadWindowStream(_ context.Context, _ model.BatchWindow, reader io.Reader) (string, error) {
+	_, _ = io.Copy(io.Discard, reader)
 	return "", s.err
 }
 
@@ -418,6 +578,7 @@ func newTestRunner(source coreSource, sink coreSink, mutate func(*config.Config)
 		Output: config.OutputConfig{
 			Format:      "avro",
 			Compression: "snappy",
+			UploadMode:  "streaming",
 		},
 		Runtime: config.RuntimeConfig{
 			MaxParallelFlushes: 1,
@@ -446,5 +607,5 @@ type coreSource interface {
 }
 
 type coreSink interface {
-	UploadWindowFile(ctx context.Context, window model.BatchWindow, file *os.File, size int64) (string, error)
+	UploadWindowStream(ctx context.Context, window model.BatchWindow, reader io.Reader) (string, error)
 }

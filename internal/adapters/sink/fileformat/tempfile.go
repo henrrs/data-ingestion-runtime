@@ -16,6 +16,11 @@ type TempFileWriter interface {
 	Abort() error
 }
 
+type StreamWriter interface {
+	WriteRecord(record model.LandingRecord) error
+	Close() error
+}
+
 type formatWriter interface {
 	WriteRecord(record model.LandingRecord) error
 	Close() error
@@ -60,6 +65,10 @@ func WriteRecordsToTempFile(records []model.LandingRecord, outputCfg config.Outp
 	}
 
 	return writer.Close()
+}
+
+func NewStreamWriter(output io.Writer, outputCfg config.OutputConfig) (StreamWriter, error) {
+	return newFormatWriter(output, outputCfg)
 }
 
 func (w *tempFileWriter) AppendRecord(record model.LandingRecord) error {

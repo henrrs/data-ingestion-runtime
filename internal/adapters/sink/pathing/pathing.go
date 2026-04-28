@@ -21,7 +21,7 @@ func BuildFilePath(basePath string, filePrefix string, window model.BatchWindow,
 	var suffixParts []string
 	for _, partition := range partitions {
 		offsets := window.OffsetsByPart[int32(partition)]
-		suffixParts = append(suffixParts, fmt.Sprintf("p%02d-%d-%d", partition, offsets.StartOffset, offsets.EndOffset))
+		suffixParts = append(suffixParts, fmt.Sprintf("p%02d-%d", partition, offsets.StartOffset))
 	}
 
 	fileName := fmt.Sprintf(

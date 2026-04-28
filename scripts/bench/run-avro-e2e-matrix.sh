@@ -8,7 +8,7 @@ mkdir -p "$OUTPUT_ROOT"
 
 COUNTS="${COUNTS:-100000 300000 500000}"
 WORKER_MATRIX="${WORKER_MATRIX:-1:1:1 2:2:2 4:2:2 2:4:2 2:2:4 4:4:4}"
-COMPRESSION="${COMPRESSION:-snappy}"
+COMPRESSION="${COMPRESSION:-null}"
 PARTITIONS="${PARTITIONS:-6}"
 PAYLOAD_BYTES="${PAYLOAD_BYTES:-8192}"
 PAYLOAD_MODE="${PAYLOAD_MODE:-pseudo-random}"
@@ -22,6 +22,15 @@ BATCH_MAX_DURATION="${BATCH_MAX_DURATION:-10m}"
 RUN_TIMEOUT="${RUN_TIMEOUT:-45m}"
 INCLUDE_HEADERS="${INCLUDE_HEADERS:-true}"
 INCLUDE_KEY="${INCLUDE_KEY:-true}"
+IDLE_POLL_TIMEOUT="${IDLE_POLL_TIMEOUT:-2s}"
+IDLE_POLL_COUNT="${IDLE_POLL_COUNT:-15}"
+KAFKA_POLL_RECORDS="${KAFKA_POLL_RECORDS:-1000}"
+KAFKA_FETCH_MAX_BYTES="${KAFKA_FETCH_MAX_BYTES:-0}"
+KAFKA_FETCH_MAX_PARTITION_BYTES="${KAFKA_FETCH_MAX_PARTITION_BYTES:-0}"
+KAFKA_FETCH_MIN_BYTES="${KAFKA_FETCH_MIN_BYTES:-0}"
+KAFKA_FETCH_MAX_WAIT="${KAFKA_FETCH_MAX_WAIT:-0s}"
+TIME_VERBOSE="${TIME_VERBOSE:-false}"
+GODEBUG_VALUE="${GODEBUG_VALUE:-}"
 
 SUMMARY_CSV="$OUTPUT_ROOT/summary.csv"
 echo "event_count,compression,flush_workers,encode_workers,upload_workers,producer_elapsed_sec,producer_maxrss_kb,connector_elapsed_sec,connector_maxrss_kb,throughput_records_per_sec,lag,objects,size_bytes,heap_alloc_bytes,heap_inuse_bytes,heap_sys_bytes,total_alloc_bytes,alloc_delta_bytes,alloc_rate_bytes_per_sec,gc_cycles,gc_pause_total_ns,page_cache_before_kb,page_cache_after_connector_kb,page_cache_after_cleanup_kb,free_kb_after_cleanup,scenario_dir" >"$SUMMARY_CSV"
@@ -197,6 +206,15 @@ run_scenario() {
   TEMP_DIR="$temp_dir" \
   INCLUDE_HEADERS="$INCLUDE_HEADERS" \
   INCLUDE_KEY="$INCLUDE_KEY" \
+  IDLE_POLL_TIMEOUT="$IDLE_POLL_TIMEOUT" \
+  IDLE_POLL_COUNT="$IDLE_POLL_COUNT" \
+  KAFKA_POLL_RECORDS="$KAFKA_POLL_RECORDS" \
+  KAFKA_FETCH_MAX_BYTES="$KAFKA_FETCH_MAX_BYTES" \
+  KAFKA_FETCH_MAX_PARTITION_BYTES="$KAFKA_FETCH_MAX_PARTITION_BYTES" \
+  KAFKA_FETCH_MIN_BYTES="$KAFKA_FETCH_MIN_BYTES" \
+  KAFKA_FETCH_MAX_WAIT="$KAFKA_FETCH_MAX_WAIT" \
+  TIME_VERBOSE="$TIME_VERBOSE" \
+  GODEBUG_VALUE="$GODEBUG_VALUE" \
   "$ROOT_DIR/scripts/bench/run-local-compression-matrix.sh"
 
   local page_cache_after_connector

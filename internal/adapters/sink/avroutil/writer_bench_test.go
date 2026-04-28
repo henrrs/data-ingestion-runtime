@@ -8,10 +8,18 @@ import (
 	"landing-connector/internal/model"
 )
 
-func BenchmarkStreamWriter(b *testing.B) {
+func BenchmarkStreamWriterSnappy(b *testing.B) {
+	benchmarkStreamWriter(b, "snappy")
+}
+
+func BenchmarkStreamWriterNull(b *testing.B) {
+	benchmarkStreamWriter(b, "null")
+}
+
+func benchmarkStreamWriter(b *testing.B, compression string) {
 	b.ReportAllocs()
 
-	writer, err := NewStreamWriter(io.Discard, "snappy")
+	writer, err := NewStreamWriter(io.Discard, compression)
 	if err != nil {
 		b.Fatalf("new stream writer: %v", err)
 	}

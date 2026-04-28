@@ -58,15 +58,16 @@ O conector registra por janela:
 - `approx_input_bytes`
 - `stream_size`
 - `records_per_sec`
-- `bytes_per_sec`
+- `upload_active_bytes_per_sec`
 - `encode_duration`
 - `upload_duration`
+- `upload_active_duration`
+- `upload_wait_for_first_byte`
 - `commit_duration`
 - `total_batch_duration`
 - `time_to_commit`
 - `format`
 - `compression`
-- `upload_mode`
 - `file_path`
 
 Ao final da execucao ele tambem registra:

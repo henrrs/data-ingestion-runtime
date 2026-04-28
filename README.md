@@ -62,12 +62,20 @@ Os knobs principais de throughput ficam em `runtime`:
 - `flush_queue_size`: buffer entre fechamento da janela e upload
 - `partition_queue_size`: buffer de entrada por particao antes de aplicar backpressure
 - `execution_mode`: `auto|finite|continuous`
+- `autotune_mode`: `auto|off`
+- `autotune_interval`: janela de decisao do autotune em runtime
+- `autotune_max_workers`: teto dinamico para `flush/encode/upload` durante exploracao
+- `autotune_poll_max`: teto dinamico para `poll_records` em runtime
 - `drain_idle_poll_count`: limite de polls ociosos para encerrar run finito apos drenar backlog
 
 Auto-tuning operacional:
 
 - quando `poll_records`, `fetch_*`, `max_parallel_*`, `flush_queue_size` ou `partition_queue_size` estao em `0`, o runtime aplica defaults automaticos com base no perfil da maquina (CPU/RAM)
 - `execution_mode: auto` resolve para `finite` quando `run_timeout > 0` e para `continuous` quando `run_timeout = 0`
+- `autotune_mode: auto` ativa controle adaptativo em duas fases:
+  - fase source: ajusta `poll_records` efetivo
+  - fase workers: explora `flush/encode/upload` com rollback automatico
+- o teto de workers tambem e ajustado dinamicamente pelo numero de particoes ativas observadas na origem (ate `autotune_max_workers`)
 - se um valor for informado explicitamente no YAML, ele sempre prevalece
 
 Para maquina local pequena, como 8 GB de RAM e SSD compartilhado com Redpanda e MinIO, o ponto operacional inicial recomendado e:
@@ -92,7 +100,6 @@ Kafka:
 
 Upload:
 
-- `output.upload_mode: streaming` e o modo oficial suportado
 - o conector nao materializa arquivo temporario local antes do upload
 - o commit continua acontecendo somente apos upload concluido com sucesso
 - logs por batch incluem metricas separadas de upload:

@@ -50,22 +50,19 @@ func TestApplyDefaultsNormalizesCase(t *testing.T) {
 	if cfg.Output.Compression != "snappy" {
 		t.Fatalf("expected output.compression to be normalized, got %q", cfg.Output.Compression)
 	}
-	if cfg.Output.UploadMode != "streaming" {
-		t.Fatalf("expected output.upload_mode default, got %q", cfg.Output.UploadMode)
-	}
 	if cfg.Kafka.PollRecords != 2000 {
 		t.Fatalf("expected kafka.poll_records default, got %d", cfg.Kafka.PollRecords)
 	}
-	if cfg.Kafka.FetchMaxBytes != 48*1024*1024 {
+	if cfg.Kafka.FetchMaxBytes != 32*1024*1024 {
 		t.Fatalf("expected kafka.fetch_max_bytes default, got %d", cfg.Kafka.FetchMaxBytes)
 	}
 	if cfg.Kafka.FetchMaxPartitionBytes != 8*1024*1024 {
 		t.Fatalf("expected kafka.fetch_max_partition_bytes default, got %d", cfg.Kafka.FetchMaxPartitionBytes)
 	}
-	if cfg.Kafka.FetchMinBytes != 512*1024 {
+	if cfg.Kafka.FetchMinBytes != 262144 {
 		t.Fatalf("expected kafka.fetch_min_bytes default, got %d", cfg.Kafka.FetchMinBytes)
 	}
-	if cfg.Kafka.FetchMaxWait != 100*time.Millisecond {
+	if cfg.Kafka.FetchMaxWait != 25*time.Millisecond {
 		t.Fatalf("expected kafka.fetch_max_wait default, got %s", cfg.Kafka.FetchMaxWait)
 	}
 	if cfg.MinIO.MultipartPartSizeMiB != 16 {
@@ -95,14 +92,23 @@ func TestApplyDefaultsNormalizesCase(t *testing.T) {
 	if cfg.Runtime.ExecutionMode != "auto" {
 		t.Fatalf("expected runtime.execution_mode default, got %q", cfg.Runtime.ExecutionMode)
 	}
+	if cfg.Runtime.AutotuneMode != "auto" {
+		t.Fatalf("expected runtime.autotune_mode default, got %q", cfg.Runtime.AutotuneMode)
+	}
+	if cfg.Runtime.AutotuneInterval != 20*time.Second {
+		t.Fatalf("expected runtime.autotune_interval default, got %s", cfg.Runtime.AutotuneInterval)
+	}
+	if cfg.Runtime.AutotuneMaxWorkers != 12 {
+		t.Fatalf("expected runtime.autotune_max_workers default, got %d", cfg.Runtime.AutotuneMaxWorkers)
+	}
+	if cfg.Runtime.AutotunePollMax != 8000 {
+		t.Fatalf("expected runtime.autotune_poll_max default, got %d", cfg.Runtime.AutotunePollMax)
+	}
 	if cfg.Runtime.DrainIdlePollCount != 2 {
 		t.Fatalf("expected runtime.drain_idle_poll_count default, got %d", cfg.Runtime.DrainIdlePollCount)
 	}
 	if cfg.Runtime.IdlePollTimeout != 2*time.Second {
 		t.Fatalf("expected runtime.idle_poll_timeout default, got %s", cfg.Runtime.IdlePollTimeout)
-	}
-	if cfg.Runtime.IdlePollCount != 15 {
-		t.Fatalf("expected runtime.idle_poll_count default, got %d", cfg.Runtime.IdlePollCount)
 	}
 	if cfg.Runtime.PprofAddr != "127.0.0.1:6060" {
 		t.Fatalf("expected runtime.pprof_addr default, got %q", cfg.Runtime.PprofAddr)
@@ -164,6 +170,18 @@ func TestApplyDefaultsKeepsExplicitKnobs(t *testing.T) {
 	if cfg.Runtime.PartitionQueueSize != 5 {
 		t.Fatalf("expected runtime.partition_queue_size to remain explicit, got %d", cfg.Runtime.PartitionQueueSize)
 	}
+	if cfg.Runtime.AutotuneMode != "auto" {
+		t.Fatalf("expected runtime.autotune_mode default, got %q", cfg.Runtime.AutotuneMode)
+	}
+	if cfg.Runtime.AutotuneInterval != 20*time.Second {
+		t.Fatalf("expected runtime.autotune_interval default, got %s", cfg.Runtime.AutotuneInterval)
+	}
+	if cfg.Runtime.AutotuneMaxWorkers != 32 {
+		t.Fatalf("expected runtime.autotune_max_workers default from explicit parallelism, got %d", cfg.Runtime.AutotuneMaxWorkers)
+	}
+	if cfg.Runtime.AutotunePollMax != 3108 {
+		t.Fatalf("expected runtime.autotune_poll_max default from explicit poll, got %d", cfg.Runtime.AutotunePollMax)
+	}
 	if cfg.MinIO.MultipartPartSizeMiB != 32 {
 		t.Fatalf("expected minio.multipart_part_size_mib to remain explicit, got %d", cfg.MinIO.MultipartPartSizeMiB)
 	}
@@ -220,16 +238,6 @@ func TestValidateRejectsUnsupportedOutputFormat(t *testing.T) {
 	}
 }
 
-func TestValidateRejectsUnsupportedUploadMode(t *testing.T) {
-	cfg := validMinIOConfig()
-	cfg.Output.UploadMode = "temp_file"
-
-	err := cfg.Validate()
-	if err == nil || !strings.Contains(err.Error(), "output.upload_mode") {
-		t.Fatalf("expected output.upload_mode validation error, got %v", err)
-	}
-}
-
 func TestValidateRejectsInvalidRuntimeSettings(t *testing.T) {
 	cfg := validMinIOConfig()
 	cfg.Runtime.MaxParallelFlushes = 0
@@ -282,6 +290,41 @@ func TestValidateRejectsInvalidRuntimeSettings(t *testing.T) {
 	}
 
 	cfg = validMinIOConfig()
+	cfg.Runtime.AutotuneMode = ""
+	err = cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "autotune_mode") {
+		t.Fatalf("expected autotune_mode validation error, got %v", err)
+	}
+
+	cfg = validMinIOConfig()
+	cfg.Runtime.AutotuneMode = "invalid"
+	err = cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "unsupported runtime.autotune_mode") {
+		t.Fatalf("expected unsupported runtime.autotune_mode validation error, got %v", err)
+	}
+
+	cfg = validMinIOConfig()
+	cfg.Runtime.AutotuneInterval = 0
+	err = cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "autotune_interval") {
+		t.Fatalf("expected autotune_interval validation error, got %v", err)
+	}
+
+	cfg = validMinIOConfig()
+	cfg.Runtime.AutotuneMaxWorkers = 0
+	err = cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "autotune_max_workers") {
+		t.Fatalf("expected autotune_max_workers validation error, got %v", err)
+	}
+
+	cfg = validMinIOConfig()
+	cfg.Runtime.AutotunePollMax = 0
+	err = cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "autotune_poll_max") {
+		t.Fatalf("expected autotune_poll_max validation error, got %v", err)
+	}
+
+	cfg = validMinIOConfig()
 	cfg.Runtime.DrainIdlePollCount = 0
 	err = cfg.Validate()
 	if err == nil || !strings.Contains(err.Error(), "drain_idle_poll_count") {
@@ -314,32 +357,6 @@ func TestValidateRejectsInvalidRuntimeSettings(t *testing.T) {
 	err = cfg.Validate()
 	if err == nil || !strings.Contains(err.Error(), "idle_poll_timeout") {
 		t.Fatalf("expected idle_poll_timeout validation error, got %v", err)
-	}
-
-	cfg = validMinIOConfig()
-	cfg.Runtime.IdlePollCount = 0
-	err = cfg.Validate()
-	if err == nil || !strings.Contains(err.Error(), "idle_poll_count") {
-		t.Fatalf("expected idle_poll_count validation error, got %v", err)
-	}
-}
-
-func TestValidateRejectsInvalidTempDir(t *testing.T) {
-	cfg := validMinIOConfig()
-	cfg.Runtime.TempDir = "/path/that/does/not/exist"
-
-	err := cfg.Validate()
-	if err == nil || !strings.Contains(err.Error(), "runtime.temp_dir") {
-		t.Fatalf("expected runtime.temp_dir validation error, got %v", err)
-	}
-}
-
-func TestValidateAcceptsExistingTempDir(t *testing.T) {
-	cfg := validMinIOConfig()
-	cfg.Runtime.TempDir = t.TempDir()
-
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("expected temp dir to be valid, got %v", err)
 	}
 }
 
@@ -392,7 +409,6 @@ func validMinIOConfig() Config {
 		Output: OutputConfig{
 			Format:      "avro",
 			Compression: "snappy",
-			UploadMode:  "streaming",
 		},
 		Runtime: RuntimeConfig{
 			MaxParallelFlushes: 1,
@@ -401,10 +417,12 @@ func validMinIOConfig() Config {
 			FlushQueueSize:     1,
 			PartitionQueueSize: 1,
 			ExecutionMode:      "finite",
+			AutotuneMode:       "auto",
+			AutotuneInterval:   20 * time.Second,
+			AutotuneMaxWorkers: 2,
+			AutotunePollMax:    4000,
 			DrainIdlePollCount: 2,
-			TempDir:            os.TempDir(),
 			IdlePollTimeout:    2 * time.Second,
-			IdlePollCount:      15,
 		},
 	}
 }

@@ -578,7 +578,6 @@ func newTestRunner(source coreSource, sink coreSink, mutate func(*config.Config)
 		Output: config.OutputConfig{
 			Format:      "avro",
 			Compression: "snappy",
-			UploadMode:  "streaming",
 		},
 		Runtime: config.RuntimeConfig{
 			MaxParallelFlushes: 1,
@@ -586,6 +585,10 @@ func newTestRunner(source coreSource, sink coreSink, mutate func(*config.Config)
 			MaxParallelUploads: 1,
 			FlushQueueSize:     1,
 			PartitionQueueSize: 1,
+			AutotuneMode:       "off",
+			AutotuneInterval:   20 * time.Second,
+			AutotuneMaxWorkers: 8,
+			AutotunePollMax:    4000,
 		},
 	}
 	if mutate != nil {

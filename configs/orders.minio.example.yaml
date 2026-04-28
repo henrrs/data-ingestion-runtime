@@ -42,7 +42,6 @@ minio:
 output:
   format: avro
   compression: null
-  upload_mode: streaming
   include_headers: true
   include_key: true
   file_prefix: part
@@ -54,12 +53,15 @@ runtime:
   max_parallel_uploads: 0
   flush_queue_size: 0
   partition_queue_size: 0
-  temp_dir: /tmp/landing-connector
   # auto: finite quando run_timeout > 0, continuo quando run_timeout = 0
   execution_mode: auto
+  # auto = runtime ajusta dinamicamente source + workers por janela
+  autotune_mode: auto
+  autotune_interval: 20s
+  autotune_max_workers: 0
+  autotune_poll_max: 0
   # numero de polls ociosos apos backlog antes de encerrar em modo finito
   drain_idle_poll_count: 2
   idle_poll_timeout: 2s
-  idle_poll_count: 15
   pprof_enabled: false
   pprof_addr: 127.0.0.1:6060

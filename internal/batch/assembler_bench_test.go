@@ -36,7 +36,6 @@ func benchmarkAssemblerAdd(b *testing.B, includeHeaders bool, includeKey bool) {
 	outputCfg := config.OutputConfig{
 		Format:         "avro",
 		Compression:    "null",
-		UploadMode:     "streaming",
 		IncludeHeaders: includeHeaders,
 		IncludeKey:     includeKey,
 	}

@@ -16,7 +16,6 @@ BATCH_SIZE="${BATCH_SIZE:-1000}"
 REPORT_EVERY="${REPORT_EVERY:-100000}"
 COMPRESSIONS="${COMPRESSIONS:-null}"
 OUTPUT_FORMAT="${OUTPUT_FORMAT:-avro}"
-UPLOAD_MODE="${UPLOAD_MODE:-streaming}"
 PIPELINE_ID="${PIPELINE_ID:-orders-stress}"
 CONSUMER_GROUP_PREFIX="${CONSUMER_GROUP_PREFIX:-orders-stress-cg}"
 TOPIC_PREFIX="${TOPIC_PREFIX:-orders-stress}"
@@ -31,9 +30,7 @@ ENCODE_WORKERS="${ENCODE_WORKERS:-$FLUSH_WORKERS}"
 UPLOAD_WORKERS="${UPLOAD_WORKERS:-$FLUSH_WORKERS}"
 PARTITION_QUEUE_SIZE="${PARTITION_QUEUE_SIZE:-4}"
 FLUSH_QUEUE_SIZE="${FLUSH_QUEUE_SIZE:-0}"
-TEMP_DIR="${TEMP_DIR:-$OUTPUT_DIR/tmp}"
 IDLE_POLL_TIMEOUT="${IDLE_POLL_TIMEOUT:-2s}"
-IDLE_POLL_COUNT="${IDLE_POLL_COUNT:-15}"
 RUN_TIMEOUT="${RUN_TIMEOUT:-30m}"
 KEEP_TOPICS="${KEEP_TOPICS:-false}"
 BATCH_MAX_RECORDS="${BATCH_MAX_RECORDS:-10000}"
@@ -73,7 +70,6 @@ if [[ ! -x /usr/bin/time ]]; then
 fi
 
 echo "Benchmark output: $OUTPUT_DIR"
-mkdir -p "$TEMP_DIR"
 
 for compression in $COMPRESSIONS; do
   run_id="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -117,7 +113,6 @@ minio:
 output:
   format: ${OUTPUT_FORMAT}
   compression: "${compression}"
-  upload_mode: ${UPLOAD_MODE}
   include_headers: ${INCLUDE_HEADERS}
   include_key: ${INCLUDE_KEY}
   file_prefix: part
@@ -127,9 +122,7 @@ runtime:
   max_parallel_uploads: ${UPLOAD_WORKERS}
   flush_queue_size: ${FLUSH_QUEUE_SIZE}
   partition_queue_size: ${PARTITION_QUEUE_SIZE}
-  temp_dir: ${TEMP_DIR}
   idle_poll_timeout: ${IDLE_POLL_TIMEOUT}
-  idle_poll_count: ${IDLE_POLL_COUNT}
   pprof_enabled: false
   pprof_addr: 127.0.0.1:6060
 EOF

@@ -13,7 +13,7 @@ Escopo do workload analisado:
 
 - Kafka/Redpanda -> Landing (MinIO), formato `avro`
 - `compression: null`
-- `upload_mode: streaming`
+- upload streaming direto (sem temp file local)
 - payload pseudoaleatorio de `8 KiB` (baixa compressibilidade)
 - `6` particoes
 - `include_headers: true`

@@ -90,7 +90,6 @@ type CredentialSpec struct {
 type OutputConfig struct {
 	Format         string `yaml:"format"`
 	Compression    string `yaml:"compression"`
-	UploadMode     string `yaml:"upload_mode"`
 	IncludeHeaders bool   `yaml:"include_headers"`
 	IncludeKey     bool   `yaml:"include_key"`
 	FilePrefix     string `yaml:"file_prefix"`
@@ -102,11 +101,13 @@ type RuntimeConfig struct {
 	MaxParallelUploads int           `yaml:"max_parallel_uploads"`
 	FlushQueueSize     int           `yaml:"flush_queue_size"`
 	PartitionQueueSize int           `yaml:"partition_queue_size"`
-	TempDir            string        `yaml:"temp_dir"`
 	ExecutionMode      string        `yaml:"execution_mode"`
+	AutotuneMode       string        `yaml:"autotune_mode"`
+	AutotuneInterval   time.Duration `yaml:"autotune_interval"`
+	AutotuneMaxWorkers int           `yaml:"autotune_max_workers"`
+	AutotunePollMax    int           `yaml:"autotune_poll_max"`
 	DrainIdlePollCount int           `yaml:"drain_idle_poll_count"`
 	IdlePollTimeout    time.Duration `yaml:"idle_poll_timeout"`
-	IdlePollCount      int           `yaml:"idle_poll_count"`
 	PprofEnabled       bool          `yaml:"pprof_enabled"`
 	PprofAddr          string        `yaml:"pprof_addr"`
 }
@@ -123,6 +124,7 @@ type tunedDefaults struct {
 	FetchMinBytes          int32
 	FetchMaxWait           time.Duration
 	MaxParallelism         int
+	AutotuneMaxWorkers     int
 	FlushQueueSize         int
 	PartitionQueueSize     int
 }
@@ -166,9 +168,6 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Output.Compression == "" {
 		c.Output.Compression = "null"
-	}
-	if c.Output.UploadMode == "" {
-		c.Output.UploadMode = "streaming"
 	}
 	if c.Output.FilePrefix == "" {
 		c.Output.FilePrefix = "part"
@@ -214,14 +213,25 @@ func (c *Config) applyDefaults() {
 	if c.Runtime.ExecutionMode == "" {
 		c.Runtime.ExecutionMode = "auto"
 	}
+	if c.Runtime.AutotuneMode == "" {
+		c.Runtime.AutotuneMode = "auto"
+	}
+	if c.Runtime.AutotuneInterval == 0 {
+		c.Runtime.AutotuneInterval = 20 * time.Second
+	}
+	if c.Runtime.AutotuneMaxWorkers == 0 {
+		c.Runtime.AutotuneMaxWorkers = defaults.AutotuneMaxWorkers
+		c.Runtime.AutotuneMaxWorkers = max(c.Runtime.AutotuneMaxWorkers, c.Runtime.MaxParallelFlushes*2)
+		c.Runtime.AutotuneMaxWorkers = min(c.Runtime.AutotuneMaxWorkers, 64)
+	}
+	if c.Runtime.AutotunePollMax == 0 {
+		c.Runtime.AutotunePollMax = clampAutoPoll(c.Kafka.PollRecords * 4)
+	}
 	if c.Runtime.DrainIdlePollCount == 0 {
 		c.Runtime.DrainIdlePollCount = 2
 	}
 	if c.Runtime.IdlePollTimeout == 0 {
 		c.Runtime.IdlePollTimeout = 2 * time.Second
-	}
-	if c.Runtime.IdlePollCount == 0 {
-		c.Runtime.IdlePollCount = 15
 	}
 	if c.Runtime.PprofAddr == "" {
 		c.Runtime.PprofAddr = "127.0.0.1:6060"
@@ -231,8 +241,8 @@ func (c *Config) applyDefaults() {
 	c.Sink.Type = strings.ToLower(c.Sink.Type)
 	c.Output.Format = strings.ToLower(c.Output.Format)
 	c.Output.Compression = strings.ToLower(c.Output.Compression)
-	c.Output.UploadMode = strings.ToLower(c.Output.UploadMode)
 	c.Runtime.ExecutionMode = strings.ToLower(c.Runtime.ExecutionMode)
+	c.Runtime.AutotuneMode = strings.ToLower(c.Runtime.AutotuneMode)
 	c.ADLS.Credential.Mode = strings.ToLower(c.ADLS.Credential.Mode)
 	c.Kafka.Security.Mechanism = strings.ToUpper(c.Kafka.Security.Mechanism)
 }
@@ -306,8 +316,9 @@ func tuneDefaults(profile hostProfile) tunedDefaults {
 			FetchMaxBytes:          32 * miB,
 			FetchMaxPartitionBytes: 8 * miB,
 			FetchMinBytes:          512 * kiB,
-			FetchMaxWait:           100 * time.Millisecond,
+			FetchMaxWait:           50 * time.Millisecond,
 			MaxParallelism:         maxParallel,
+			AutotuneMaxWorkers:     12,
 			FlushQueueSize:         max(8, maxParallel*4),
 			PartitionQueueSize:     64,
 		}
@@ -318,8 +329,9 @@ func tuneDefaults(profile hostProfile) tunedDefaults {
 			FetchMaxBytes:          32 * miB,
 			FetchMaxPartitionBytes: 8 * miB,
 			FetchMinBytes:          256 * kiB,
-			FetchMaxWait:           100 * time.Millisecond,
+			FetchMaxWait:           25 * time.Millisecond,
 			MaxParallelism:         maxParallel,
+			AutotuneMaxWorkers:     12,
 			FlushQueueSize:         max(8, maxParallel*4),
 			PartitionQueueSize:     64,
 		}
@@ -330,8 +342,9 @@ func tuneDefaults(profile hostProfile) tunedDefaults {
 			FetchMaxBytes:          64 * miB,
 			FetchMaxPartitionBytes: 16 * miB,
 			FetchMinBytes:          1 * miB,
-			FetchMaxWait:           100 * time.Millisecond,
+			FetchMaxWait:           50 * time.Millisecond,
 			MaxParallelism:         maxParallel,
+			AutotuneMaxWorkers:     20,
 			FlushQueueSize:         max(16, maxParallel*4),
 			PartitionQueueSize:     128,
 		}
@@ -344,6 +357,7 @@ func tuneDefaults(profile hostProfile) tunedDefaults {
 			FetchMinBytes:          2 * miB,
 			FetchMaxWait:           75 * time.Millisecond,
 			MaxParallelism:         maxParallel,
+			AutotuneMaxWorkers:     32,
 			FlushQueueSize:         max(24, maxParallel*4),
 			PartitionQueueSize:     256,
 		}
@@ -389,18 +403,18 @@ func tuneFetchFromScenario(defaults tunedDefaults, recordBytes int) (int32, int3
 		maxFetchPartMax = 64 * miB
 	)
 
-	scenarioPart := recordBytes * 512
+	scenarioPart := recordBytes * 384
 	fetchMaxPartition := max(int(defaults.FetchMaxPartitionBytes), scenarioPart)
 	fetchMaxPartition = min(max(fetchMaxPartition, minFetchPartMax), maxFetchPartMax)
 
-	scenarioMax := fetchMaxPartition * 6
+	scenarioMax := fetchMaxPartition * 4
 	fetchMax := max(int(defaults.FetchMaxBytes), scenarioMax)
 	fetchMax = min(max(fetchMax, minFetchMax), maxFetchMax)
 
-	scenarioMin := recordBytes * 64
+	scenarioMin := recordBytes * 32
 	fetchMin := max(int(defaults.FetchMinBytes), scenarioMin)
-	if fetchMin > fetchMax/2 {
-		fetchMin = fetchMax / 2
+	if fetchMin > fetchMax/4 {
+		fetchMin = fetchMax / 4
 	}
 
 	return int32(fetchMax), int32(fetchMaxPartition), int32(fetchMin)
@@ -452,12 +466,18 @@ func (c Config) Validate() error {
 		return errors.New("runtime.partition_queue_size must be > 0")
 	case c.Runtime.ExecutionMode == "":
 		return errors.New("runtime.execution_mode is required")
+	case c.Runtime.AutotuneMode == "":
+		return errors.New("runtime.autotune_mode is required")
+	case c.Runtime.AutotuneInterval <= 0:
+		return errors.New("runtime.autotune_interval must be > 0")
+	case c.Runtime.AutotuneMaxWorkers <= 0:
+		return errors.New("runtime.autotune_max_workers must be > 0")
+	case c.Runtime.AutotunePollMax <= 0:
+		return errors.New("runtime.autotune_poll_max must be > 0")
 	case c.Runtime.DrainIdlePollCount <= 0:
 		return errors.New("runtime.drain_idle_poll_count must be > 0")
 	case c.Runtime.IdlePollTimeout <= 0:
 		return errors.New("runtime.idle_poll_timeout must be > 0")
-	case c.Runtime.IdlePollCount <= 0:
-		return errors.New("runtime.idle_poll_count must be > 0")
 	}
 
 	switch c.Runtime.ExecutionMode {
@@ -466,14 +486,10 @@ func (c Config) Validate() error {
 		return fmt.Errorf("unsupported runtime.execution_mode: %s", c.Runtime.ExecutionMode)
 	}
 
-	if c.Runtime.TempDir != "" {
-		info, err := os.Stat(c.Runtime.TempDir)
-		if err != nil {
-			return fmt.Errorf("runtime.temp_dir: %w", err)
-		}
-		if !info.IsDir() {
-			return fmt.Errorf("runtime.temp_dir must be a directory: %s", c.Runtime.TempDir)
-		}
+	switch c.Runtime.AutotuneMode {
+	case "auto", "off":
+	default:
+		return fmt.Errorf("unsupported runtime.autotune_mode: %s", c.Runtime.AutotuneMode)
 	}
 
 	switch c.Output.Format {
@@ -485,10 +501,6 @@ func (c Config) Validate() error {
 		}
 	default:
 		return fmt.Errorf("unsupported output.format: %s", c.Output.Format)
-	}
-
-	if c.Output.UploadMode != "streaming" {
-		return fmt.Errorf("unsupported output.upload_mode: %s", c.Output.UploadMode)
 	}
 
 	switch c.Source.Type {
@@ -539,6 +551,16 @@ func max(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func clampAutoPoll(limit int) int {
+	if limit < 1 {
+		return 1
+	}
+	if limit > 32000 {
+		return 32000
+	}
+	return limit
 }
 
 func (o OutputConfig) FileExtension() string {

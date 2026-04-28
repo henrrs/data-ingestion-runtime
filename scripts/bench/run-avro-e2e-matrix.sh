@@ -23,7 +23,6 @@ RUN_TIMEOUT="${RUN_TIMEOUT:-45m}"
 INCLUDE_HEADERS="${INCLUDE_HEADERS:-true}"
 INCLUDE_KEY="${INCLUDE_KEY:-true}"
 IDLE_POLL_TIMEOUT="${IDLE_POLL_TIMEOUT:-2s}"
-IDLE_POLL_COUNT="${IDLE_POLL_COUNT:-15}"
 KAFKA_POLL_RECORDS="${KAFKA_POLL_RECORDS:-1000}"
 KAFKA_FETCH_MAX_BYTES="${KAFKA_FETCH_MAX_BYTES:-0}"
 KAFKA_FETCH_MAX_PARTITION_BYTES="${KAFKA_FETCH_MAX_PARTITION_BYTES:-0}"
@@ -172,8 +171,7 @@ run_scenario() {
   local upload_workers="$4"
 
   local scenario_dir="$OUTPUT_ROOT/count=${event_count}/flush=${flush_workers}-encode=${encode_workers}-upload=${upload_workers}"
-  local temp_dir="$scenario_dir/tmp"
-  mkdir -p "$scenario_dir" "$temp_dir"
+  mkdir -p "$scenario_dir"
 
   echo
   echo "==> event_count=$event_count compression=$COMPRESSION flush=$flush_workers encode=$encode_workers upload=$upload_workers"
@@ -203,11 +201,9 @@ run_scenario() {
   BATCH_MAX_BYTES="$BATCH_MAX_BYTES" \
   BATCH_MAX_DURATION="$BATCH_MAX_DURATION" \
   RUN_TIMEOUT="$RUN_TIMEOUT" \
-  TEMP_DIR="$temp_dir" \
   INCLUDE_HEADERS="$INCLUDE_HEADERS" \
   INCLUDE_KEY="$INCLUDE_KEY" \
   IDLE_POLL_TIMEOUT="$IDLE_POLL_TIMEOUT" \
-  IDLE_POLL_COUNT="$IDLE_POLL_COUNT" \
   KAFKA_POLL_RECORDS="$KAFKA_POLL_RECORDS" \
   KAFKA_FETCH_MAX_BYTES="$KAFKA_FETCH_MAX_BYTES" \
   KAFKA_FETCH_MAX_PARTITION_BYTES="$KAFKA_FETCH_MAX_PARTITION_BYTES" \

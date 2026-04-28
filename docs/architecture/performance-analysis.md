@@ -246,7 +246,7 @@ Portanto:
 
 ### Alteracao aplicada
 
-Para estabilizar o caminho oficial `avro + compression: null + upload_mode: streaming`, foi ajustado o upload multipart do MinIO:
+Para estabilizar o caminho oficial `avro + compression: null + streaming direto`, foi ajustado o upload multipart do MinIO:
 
 - novo parametro `minio.multipart_part_size_mib` com default `16`
 - uso explicito de `PartSize` no `PutObject` do MinIO

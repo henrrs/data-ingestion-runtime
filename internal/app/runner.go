@@ -1,11 +1,15 @@
 package app
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"runtime"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -116,9 +120,12 @@ func (r *Runner) Run(ctx context.Context) error {
 
 	errCh := make(chan error, 1)
 	uploadedTasks := make(chan uploadedTask, r.cfg.Runtime.FlushQueueSize)
-	flushLimiter := make(chan struct{}, r.cfg.Runtime.MaxParallelFlushes)
-	encodeLimiter := make(chan struct{}, r.cfg.Runtime.MaxParallelEncodes)
-	uploadLimiter := make(chan struct{}, r.cfg.Runtime.MaxParallelUploads)
+	maxWorkers := r.cfg.Runtime.AutotuneMaxWorkers
+	flushLimiter := newAdaptiveLimiter(r.cfg.Runtime.MaxParallelFlushes, maxWorkers)
+	encodeLimiter := newAdaptiveLimiter(r.cfg.Runtime.MaxParallelEncodes, maxWorkers)
+	uploadLimiter := newAdaptiveLimiter(r.cfg.Runtime.MaxParallelUploads, maxWorkers)
+	autotuner := newRuntimeAutoTuner(r.cfg, r.logger, flushLimiter, encodeLimiter, uploadLimiter)
+	autotuner.Start(runCtx)
 
 	reportErr := func(err error) {
 		if err == nil {
@@ -144,7 +151,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	commitWG.Add(1)
 	go func() {
 		defer commitWG.Done()
-		if err := r.runCommitCoordinator(runCtx, uploadedTasks); err != nil && !errors.Is(err, context.Canceled) {
+		if err := r.runCommitCoordinator(runCtx, uploadedTasks, autotuner); err != nil && !errors.Is(err, context.Canceled) {
 			reportErr(err)
 		}
 	}()
@@ -165,6 +172,7 @@ func (r *Runner) Run(ctx context.Context) error {
 
 		messages := make(chan model.KafkaMessage, r.cfg.Runtime.PartitionQueueSize)
 		partitions[partition] = messages
+		autotuner.RecordActivePartitionCount(len(partitions))
 		partitionsWG.Add(1)
 		go func() {
 			defer partitionsWG.Done()
@@ -177,6 +185,7 @@ func (r *Runner) Run(ctx context.Context) error {
 				flushLimiter,
 				encodeLimiter,
 				uploadLimiter,
+				autotuner,
 				&finalizeWG,
 			); err != nil && !errors.Is(err, context.Canceled) {
 				reportErr(err)
@@ -188,9 +197,6 @@ func (r *Runner) Run(ctx context.Context) error {
 
 	var runErr error
 	executionMode := r.resolvedExecutionMode()
-	basePollLimit := r.initialPollLimit()
-	maxPollLimit := clampPollLimit(basePollLimit * 4)
-	pollLimit := basePollLimit
 	seenMessages := false
 	consecutiveIdlePolls := 0
 
@@ -209,13 +215,14 @@ pollLoop:
 			break
 		}
 
+		pollLimit := autotuner.CurrentPollLimit()
 		pollCtx, pollCancel := context.WithTimeout(runCtx, r.idlePollTimeout())
 		messages, err := r.source.Poll(pollCtx, pollLimit)
 		pollCancel()
 		if err != nil {
 			if errors.Is(err, context.DeadlineExceeded) && runCtx.Err() == nil && ctx.Err() == nil {
 				consecutiveIdlePolls++
-				pollLimit = reducePollLimit(pollLimit, basePollLimit)
+				autotuner.RecordPoll(0, true)
 				if r.shouldStopOnIdle(executionMode, seenMessages, consecutiveIdlePolls) {
 					break
 				}
@@ -231,18 +238,16 @@ pollLoop:
 
 		if len(messages) == 0 {
 			consecutiveIdlePolls++
-			pollLimit = reducePollLimit(pollLimit, basePollLimit)
+			autotuner.RecordPoll(0, true)
 			if r.shouldStopOnIdle(executionMode, seenMessages, consecutiveIdlePolls) {
 				break
 			}
 			continue
 		}
 
+		autotuner.RecordPoll(len(messages), false)
 		seenMessages = true
 		consecutiveIdlePolls = 0
-		if len(messages) >= pollLimit && pollLimit < maxPollLimit {
-			pollLimit = clampPollLimit(minInt(maxPollLimit, pollLimit*2))
-		}
 
 		for _, msg := range messages {
 			queue := getPartitionQueue(msg.Partition)
@@ -287,13 +292,6 @@ func (r *Runner) idlePollTimeout() time.Duration {
 	return 2 * time.Second
 }
 
-func (r *Runner) idlePollCount() int {
-	if r.cfg.Runtime.IdlePollCount > 0 {
-		return r.cfg.Runtime.IdlePollCount
-	}
-	return 15
-}
-
 func (r *Runner) drainIdlePollCount() int {
 	if r.cfg.Runtime.DrainIdlePollCount > 0 {
 		return r.cfg.Runtime.DrainIdlePollCount
@@ -328,20 +326,6 @@ func (r *Runner) shouldStopOnIdle(mode string, seenMessages bool, consecutiveIdl
 	return consecutiveIdlePolls >= r.drainIdlePollCount()
 }
 
-func (r *Runner) initialPollLimit() int {
-	if r.cfg.Kafka.PollRecords > 0 {
-		return clampPollLimit(r.cfg.Kafka.PollRecords)
-	}
-	return 1000
-}
-
-func reducePollLimit(current, base int) int {
-	if current <= base {
-		return base
-	}
-	return maxInt(base, current/2)
-}
-
 func clampPollLimit(limit int) int {
 	if limit < 1 {
 		return 1
@@ -358,9 +342,10 @@ func (r *Runner) runPartitionWorker(
 	partition int32,
 	messages <-chan model.KafkaMessage,
 	uploadedTasks chan<- uploadedTask,
-	flushLimiter chan struct{},
-	encodeLimiter chan struct{},
-	uploadLimiter chan struct{},
+	flushLimiter *adaptiveLimiter,
+	encodeLimiter *adaptiveLimiter,
+	uploadLimiter *adaptiveLimiter,
+	autotuner *runtimeAutoTuner,
 	finalizeWG *sync.WaitGroup,
 ) error {
 	assembler := batch.NewAssembler(r.cfg.Batch, r.cfg.Output, runID, time.Now().UTC())
@@ -476,14 +461,14 @@ func (r *Runner) runPartitionWorker(
 			return errors.New("sealed non-empty window without active stream")
 		}
 
-		releaseFlush, err := acquireLimiter(ctx, flushLimiter)
+		releaseFlush, err := flushLimiter.Acquire(ctx)
 		if err != nil {
 			abortActiveStream(stream, err)
 			return err
 		}
 		releaseFlush = singleRelease(releaseFlush)
 
-		releaseUpload, err := acquireLimiter(ctx, uploadLimiter)
+		releaseUpload, err := uploadLimiter.Acquire(ctx)
 		if err != nil {
 			releaseFlush()
 			abortActiveStream(stream, err)
@@ -541,7 +526,7 @@ func (r *Runner) runPartitionWorker(
 				}
 			}
 
-			releaseEncode, err := acquireLimiter(ctx, encodeLimiter)
+			releaseEncode, err := encodeLimiter.Acquire(ctx)
 			if err != nil {
 				abortActiveStream(stream, err)
 				return err
@@ -559,6 +544,9 @@ func (r *Runner) runPartitionWorker(
 				return err
 			}
 			releaseEncode()
+			if autotuner != nil {
+				autotuner.RecordEncodedRecord()
+			}
 
 			if assembler.ShouldFlush(msg.IngestionTime) {
 				if err := flushWindow(msg.IngestionTime); err != nil {
@@ -569,7 +557,7 @@ func (r *Runner) runPartitionWorker(
 	}
 }
 
-func (r *Runner) runCommitCoordinator(ctx context.Context, uploadedTasks <-chan uploadedTask) error {
+func (r *Runner) runCommitCoordinator(ctx context.Context, uploadedTasks <-chan uploadedTask, autotuner *runtimeAutoTuner) error {
 	states := make(map[int32]*partitionCommitState)
 
 	for {
@@ -626,6 +614,9 @@ func (r *Runner) runCommitCoordinator(ctx context.Context, uploadedTasks <-chan 
 			for _, readyTask := range readyTasks {
 				readyTask.releaseFlush()
 				logBatchFlushed(r.logger, r.cfg, readyTask, committedAt, commitDuration)
+				if autotuner != nil {
+					autotuner.RecordBatch(readyTask, commitDuration)
+				}
 			}
 		}
 	}
@@ -653,7 +644,6 @@ func logBatchFlushed(logger *zap.Logger, cfg config.Config, task uploadedTask, c
 		zap.String("topic", task.window.Topic),
 		zap.String("format", cfg.Output.Format),
 		zap.String("compression", cfg.Output.Compression),
-		zap.String("upload_mode", cfg.Output.UploadMode),
 		zap.String("file_path", task.filePath),
 		zap.Int32("partition", task.partition),
 		zap.Int64("sequence", task.sequence),
@@ -687,15 +677,6 @@ func abortActiveStream(stream *activeStream, reason error) {
 	}
 	_ = stream.pipeWriter.CloseWithError(reason)
 	_ = stream.writer.Close()
-}
-
-func acquireLimiter(ctx context.Context, limiter chan struct{}) (func(), error) {
-	select {
-	case limiter <- struct{}{}:
-		return func() { <-limiter }, nil
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
 }
 
 func sendWithContext[T any](ctx context.Context, target chan<- T, value T) (err error) {
@@ -786,6 +767,479 @@ func maxDuration(a, b time.Duration) time.Duration {
 	return b
 }
 
+type adaptiveLimiter struct {
+	max atomic.Int64
+
+	target atomic.Int64
+	inUse  atomic.Int64
+}
+
+func newAdaptiveLimiter(initial, max int) *adaptiveLimiter {
+	maxValue := int64(max)
+	if maxValue <= 0 {
+		maxValue = 1
+	}
+	target := int64(initial)
+	if target <= 0 {
+		target = 1
+	}
+	if target > maxValue {
+		target = maxValue
+	}
+
+	limiter := &adaptiveLimiter{}
+	limiter.max.Store(maxValue)
+	limiter.target.Store(target)
+	return limiter
+}
+
+func (l *adaptiveLimiter) Acquire(ctx context.Context) (func(), error) {
+	for {
+		target := l.target.Load()
+		inUse := l.inUse.Load()
+		if inUse < target {
+			if l.inUse.CompareAndSwap(inUse, inUse+1) {
+				return func() {
+					l.inUse.Add(-1)
+				}, nil
+			}
+			continue
+		}
+
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(time.Millisecond):
+		}
+	}
+}
+
+func (l *adaptiveLimiter) SetTarget(value int) {
+	target := int64(value)
+	if target < 1 {
+		target = 1
+	}
+	maxValue := l.max.Load()
+	if target > maxValue {
+		target = maxValue
+	}
+	l.target.Store(target)
+}
+
+func (l *adaptiveLimiter) SetMax(value int) {
+	maxValue := int64(value)
+	if maxValue < 1 {
+		maxValue = 1
+	}
+	l.max.Store(maxValue)
+	current := l.target.Load()
+	if current > maxValue {
+		l.target.Store(maxValue)
+	}
+}
+
+func (l *adaptiveLimiter) Target() int {
+	return int(l.target.Load())
+}
+
+func (l *adaptiveLimiter) Max() int {
+	return int(l.max.Load())
+}
+
+type autotuneChange struct {
+	dimension string
+	previous  int
+}
+
+type runtimeAutoTuner struct {
+	cfg    config.Config
+	logger *zap.Logger
+
+	enabled bool
+
+	pollMin int
+	pollMax int
+
+	pollLimit atomic.Int64
+
+	flushLimiter   *adaptiveLimiter
+	encodeLimiter  *adaptiveLimiter
+	uploadLimiter  *adaptiveLimiter
+	exploreWorkers bool
+	maxWorkersHard int
+
+	pollCalls   atomic.Int64
+	idlePolls   atomic.Int64
+	polledMsgs  atomic.Int64
+	encodedRecs atomic.Int64
+	batchCount  atomic.Int64
+	waitNs      atomic.Int64
+	activeNs    atomic.Int64
+	commitNs    atomic.Int64
+	activeParts atomic.Int64
+
+	mu                sync.Mutex
+	lastScore         float64
+	phase             string
+	sourceWindows     int
+	workerDimensionIx int
+	pendingChange     *autotuneChange
+	prevPauseTotalNs  uint64
+	heapBudgetBytes   uint64
+}
+
+func newRuntimeAutoTuner(
+	cfg config.Config,
+	logger *zap.Logger,
+	flushLimiter *adaptiveLimiter,
+	encodeLimiter *adaptiveLimiter,
+	uploadLimiter *adaptiveLimiter,
+) *runtimeAutoTuner {
+	pollMin := clampPollLimit(cfg.Kafka.PollRecords)
+	if pollMin <= 0 {
+		pollMin = 1000
+	}
+	pollMax := clampPollLimit(cfg.Runtime.AutotunePollMax)
+	if pollMax < pollMin {
+		pollMax = pollMin
+	}
+
+	mode := strings.ToLower(cfg.Runtime.AutotuneMode)
+	enabled := mode != "off"
+
+	t := &runtimeAutoTuner{
+		cfg:             cfg,
+		logger:          logger,
+		enabled:         enabled,
+		pollMin:         pollMin,
+		pollMax:         pollMax,
+		flushLimiter:    flushLimiter,
+		encodeLimiter:   encodeLimiter,
+		uploadLimiter:   uploadLimiter,
+		exploreWorkers:  shouldExploreWorkers(cfg),
+		maxWorkersHard:  maxInt(1, cfg.Runtime.AutotuneMaxWorkers),
+		phase:           "source",
+		heapBudgetBytes: detectHeapBudgetBytes(),
+	}
+	t.pollLimit.Store(int64(pollMin))
+	return t
+}
+
+func (t *runtimeAutoTuner) Start(ctx context.Context) {
+	if !t.enabled {
+		return
+	}
+
+	interval := t.cfg.Runtime.AutotuneInterval
+	if interval <= 0 {
+		interval = 20 * time.Second
+	}
+
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				t.evaluate(interval)
+			}
+		}
+	}()
+}
+
+func (t *runtimeAutoTuner) CurrentPollLimit() int {
+	limit := int(t.pollLimit.Load())
+	if limit <= 0 {
+		return t.pollMin
+	}
+	return clampPollLimit(limit)
+}
+
+func (t *runtimeAutoTuner) RecordPoll(messageCount int, idle bool) {
+	if !t.enabled {
+		return
+	}
+	t.pollCalls.Add(1)
+	if idle {
+		t.idlePolls.Add(1)
+		return
+	}
+	t.polledMsgs.Add(int64(messageCount))
+}
+
+func (t *runtimeAutoTuner) RecordEncodedRecord() {
+	if !t.enabled {
+		return
+	}
+	t.encodedRecs.Add(1)
+}
+
+func (t *runtimeAutoTuner) RecordBatch(task uploadedTask, commitDuration time.Duration) {
+	if !t.enabled {
+		return
+	}
+	t.batchCount.Add(1)
+	t.waitNs.Add(task.uploadWaitFirstByte.Nanoseconds())
+	t.activeNs.Add(task.uploadActiveDuration.Nanoseconds())
+	t.commitNs.Add(commitDuration.Nanoseconds())
+}
+
+func (t *runtimeAutoTuner) RecordActivePartitionCount(count int) {
+	if !t.enabled {
+		return
+	}
+	if count < 1 {
+		count = 1
+	}
+	t.activeParts.Store(int64(count))
+}
+
+func (t *runtimeAutoTuner) evaluate(interval time.Duration) {
+	pollCalls := t.pollCalls.Swap(0)
+	idlePolls := t.idlePolls.Swap(0)
+	polledMsgs := t.polledMsgs.Swap(0)
+	encodedRecs := t.encodedRecs.Swap(0)
+	batchCount := t.batchCount.Swap(0)
+	waitNs := t.waitNs.Swap(0)
+	activeNs := t.activeNs.Swap(0)
+	commitNs := t.commitNs.Swap(0)
+
+	var mem runtime.MemStats
+	runtime.ReadMemStats(&mem)
+	gcPauseDeltaNs := int64(mem.PauseTotalNs - t.prevPauseTotalNs)
+	t.prevPauseTotalNs = mem.PauseTotalNs
+
+	seconds := interval.Seconds()
+	if seconds <= 0 {
+		seconds = 1
+	}
+	throughput := float64(encodedRecs) / seconds
+	idleRatio := float64(idlePolls) / float64(maxInt64(1, pollCalls))
+	avgWait := float64(waitNs) / float64(maxInt64(1, batchCount))
+	avgActive := float64(activeNs) / float64(maxInt64(1, batchCount))
+	avgCommit := float64(commitNs) / float64(maxInt64(1, batchCount))
+	activeParts := int(t.activeParts.Load())
+
+	score := throughput
+	if t.heapBudgetBytes > 0 && mem.HeapAlloc > t.heapBudgetBytes {
+		overflowMiB := float64(mem.HeapAlloc-t.heapBudgetBytes) / (1024.0 * 1024.0)
+		score -= overflowMiB * 25
+	}
+	score -= float64(gcPauseDeltaNs) / float64(time.Millisecond) * 0.8
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	t.applyDynamicWorkerMax(activeParts)
+
+	if t.phase == "source" {
+		t.tuneSource(idleRatio, polledMsgs, throughput)
+		t.sourceWindows++
+		if t.sourceWindows >= 3 {
+			t.phase = "workers"
+		}
+		t.lastScore = score
+		return
+	}
+
+	if t.pendingChange != nil {
+		rollback := score < (t.lastScore * 0.97)
+		if t.heapBudgetBytes > 0 && mem.HeapAlloc > t.heapBudgetBytes {
+			rollback = true
+		}
+		if rollback {
+			t.setDimensionTarget(t.pendingChange.dimension, t.pendingChange.previous)
+			t.logger.Info("autotune rollback",
+				zap.String("dimension", t.pendingChange.dimension),
+				zap.Int("target", t.pendingChange.previous),
+				zap.Float64("score", score),
+				zap.Float64("last_score", t.lastScore),
+			)
+		}
+		t.pendingChange = nil
+		t.lastScore = score
+		return
+	}
+
+	if t.heapBudgetBytes > 0 && mem.HeapAlloc > t.heapBudgetBytes {
+		if t.reduceWorkers() {
+			t.logger.Info("autotune reduce workers due heap pressure",
+				zap.Uint64("heap_alloc_bytes", mem.HeapAlloc),
+				zap.Uint64("heap_budget_bytes", t.heapBudgetBytes),
+			)
+		}
+		t.lastScore = score
+		return
+	}
+
+	if !t.exploreWorkers {
+		t.lastScore = score
+		return
+	}
+
+	dimension := []string{"flush", "encode", "upload"}[t.workerDimensionIx%3]
+	t.workerDimensionIx++
+	current := t.dimensionTarget(dimension)
+	maxTarget := t.dimensionMax(dimension)
+	if current < maxTarget {
+		t.setDimensionTarget(dimension, current+1)
+		t.pendingChange = &autotuneChange{
+			dimension: dimension,
+			previous:  current,
+		}
+		t.logger.Info("autotune explore worker",
+			zap.String("dimension", dimension),
+			zap.Int("from", current),
+			zap.Int("to", current+1),
+			zap.Int("active_partitions", activeParts),
+			zap.Float64("throughput_rec_s", throughput),
+			zap.Float64("idle_ratio", idleRatio),
+			zap.Float64("avg_upload_wait_s", avgWait/float64(time.Second)),
+			zap.Float64("avg_upload_active_s", avgActive/float64(time.Second)),
+			zap.Float64("avg_commit_s", avgCommit/float64(time.Second)),
+		)
+	}
+	t.lastScore = score
+}
+
+func (t *runtimeAutoTuner) tuneSource(idleRatio float64, polledMsgs int64, throughput float64) {
+	current := t.CurrentPollLimit()
+	target := current
+
+	switch {
+	case idleRatio > 0.30 && current < t.pollMax:
+		target = minInt(current*2, t.pollMax)
+	case idleRatio < 0.03 && current > t.pollMin:
+		target = maxInt(current/2, t.pollMin)
+	}
+
+	if target == current {
+		return
+	}
+	t.pollLimit.Store(int64(target))
+	t.logger.Info("autotune adjust source",
+		zap.Int("poll_limit_from", current),
+		zap.Int("poll_limit_to", target),
+		zap.Float64("idle_ratio", idleRatio),
+		zap.Int64("polled_messages", polledMsgs),
+		zap.Float64("throughput_rec_s", throughput),
+	)
+}
+
+func (t *runtimeAutoTuner) dimensionTarget(dimension string) int {
+	switch dimension {
+	case "flush":
+		return t.flushLimiter.Target()
+	case "encode":
+		return t.encodeLimiter.Target()
+	default:
+		return t.uploadLimiter.Target()
+	}
+}
+
+func (t *runtimeAutoTuner) dimensionMax(dimension string) int {
+	switch dimension {
+	case "flush":
+		return t.flushLimiter.Max()
+	case "encode":
+		return t.encodeLimiter.Max()
+	default:
+		return t.uploadLimiter.Max()
+	}
+}
+
+func (t *runtimeAutoTuner) setDimensionTarget(dimension string, target int) {
+	switch dimension {
+	case "flush":
+		t.flushLimiter.SetTarget(target)
+	case "encode":
+		t.encodeLimiter.SetTarget(target)
+	default:
+		t.uploadLimiter.SetTarget(target)
+	}
+}
+
+func (t *runtimeAutoTuner) applyDynamicWorkerMax(activePartitions int) {
+	if activePartitions <= 0 {
+		return
+	}
+	dynamicMax := minInt(t.maxWorkersHard, maxInt(1, activePartitions))
+	t.flushLimiter.SetMax(dynamicMax)
+	t.encodeLimiter.SetMax(dynamicMax)
+	t.uploadLimiter.SetMax(dynamicMax)
+}
+
+func (t *runtimeAutoTuner) reduceWorkers() bool {
+	for _, dimension := range []string{"upload", "encode", "flush"} {
+		current := t.dimensionTarget(dimension)
+		if current > 1 {
+			t.setDimensionTarget(dimension, current-1)
+			return true
+		}
+	}
+	return false
+}
+
+func detectHeapBudgetBytes() uint64 {
+	const (
+		miB = 1024 * 1024
+		giB = 1024 * miB
+	)
+
+	file, err := os.Open("/proc/meminfo")
+	if err != nil {
+		return 900 * miB
+	}
+	defer file.Close()
+
+	var totalBytes uint64
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if !strings.HasPrefix(line, "MemTotal:") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			break
+		}
+		kb, parseErr := strconv.ParseUint(fields[1], 10, 64)
+		if parseErr != nil {
+			break
+		}
+		totalBytes = kb * 1024
+		break
+	}
+
+	if totalBytes == 0 {
+		return 900 * miB
+	}
+
+	budget := totalBytes / 3
+	if budget < 600*miB {
+		budget = 600 * miB
+	}
+	if budget > 3*giB {
+		budget = 3 * giB
+	}
+	return budget
+}
+
+func shouldExploreWorkers(cfg config.Config) bool {
+	mode := strings.ToLower(cfg.Runtime.ExecutionMode)
+	switch mode {
+	case "continuous":
+		return true
+	case "auto":
+		return cfg.RunTimeout <= 0
+	default:
+		return false
+	}
+}
+
 func minInt(a, b int) int {
 	if a < b {
 		return a
@@ -794,6 +1248,13 @@ func minInt(a, b int) int {
 }
 
 func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func maxInt64(a, b int64) int64 {
 	if a > b {
 		return a
 	}

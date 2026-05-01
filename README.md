@@ -1,116 +1,200 @@
-# Landing Connector
+# Data Ingestion Runtime
 
-Conector batch para consumir dados de um topico Kafka e gravar arquivos raw append-only em uma landing zone object storage.
+Runtime em Go para ingestao Kafka/Redpanda -> Landing Zone, com foco em throughput, previsibilidade e seguranca de offset commit.
 
-## Papel Da Landing Zone
+## Objetivo do motor
 
-A Landing Zone deste runtime funciona como uma camada raw, imutavel e WAL-like:
+Este conector existe para capturar dados da origem o mais rapido possivel e persistir em landing raw append-only (WAL-like), sem transformar semanticamente o payload.
 
-- captura o dado do Kafka o mais fiel possivel
-- nao faz deduplicacao
-- nao faz parsing pesado do payload
-- nao faz transformacao semantica para modelo analitico
-- so comita offsets depois de persistir o arquivo com sucesso
+Principios:
 
-A materializacao para Bronze/Delta deve acontecer depois, fora deste caminho quente.
+- landing e raw: sem deduplicacao, sem enriquecimento, sem modelagem analitica
+- payload segue fiel ao Kafka
+- commit de offset acontece somente apos persistencia remota bem-sucedida
+- Bronze/Delta e responsabilidade de etapa posterior (fora deste runtime)
 
-## Caracteristicas
+## Pipeline em 3 etapas
 
-- Consumo Kafka com commit manual
-- Batch limitado por tempo, quantidade de registros e bytes aproximados
-- Escrita em Avro OCF com payload bruto preservado
-- Colunas tecnicas do Kafka para auditoria e replay
-- Manifest simplificado em logs estruturados
-- Preparado para execucao em `Kubernetes CronJob`
-- Arquitetura extensivel com `Source` e `Sink` plugaveis
+### Etapa 1: Capture (Kafka Source)
 
-## Estrutura
+Responsabilidades:
 
-- `cmd/landing-connector`: ponto de entrada
-- `internal/core`: portas e factories
-- `internal/adapters`: adapters concretos de origem, destino e serializacao
-- `internal/config`: carga e validacao de configuracao
-- `internal/app`: orquestracao da execucao batch
-- `internal/batch`: montagem do lote
-- `internal/model`: contratos tecnicos do lote
-- `docs/architecture`: decisoes arquiteturais e guias
+- consumir mensagens por particao via `franz-go`
+- aplicar tuning de fetch/poll
+- montar `KafkaMessage` tecnico (topic/partition/offset/key/headers/schema id/payload)
+- entregar mensagens para workers de particao
 
-## Exemplo de execucao
+Arquivos:
 
-```powershell
-landing-connector.exe -config .\configs\orders.yaml
+- `internal/adapters/source/kafka/source.go`
+- `internal/core/ports.go` (`Source`)
+
+### Etapa 2: Assemble + Encode (Hot Path)
+
+Responsabilidades:
+
+- agregar janela por particao (`BatchWindow` + ranges de offset)
+- converter `KafkaMessage` em `LandingRecord`
+- serializar incrementalmente em Avro OCF no stream (`io.Pipe`)
+- controlar concorrencia de encode/flush com backpressure
+
+Arquivos:
+
+- `internal/batch/assembler.go`
+- `internal/adapters/sink/fileformat/tempfile.go` (somente stream writer; sem temp file)
+- `internal/adapters/sink/avroutil/writer.go`
+- `internal/model/record.go`
+- `internal/app/runner.go`
+
+### Etapa 3: Persist + Commit (Sink + Coordinator)
+
+Responsabilidades:
+
+- upload streaming para MinIO/ADLS
+- coordenar commit em ordem por particao
+- coalescer lotes contiguos quando possivel
+- nunca comitar lote com falha de upload
+
+Arquivos:
+
+- `internal/adapters/sink/minio/sink.go`
+- `internal/adapters/sink/adls/sink.go`
+- `internal/adapters/sink/pathing/pathing.go`
+- `internal/app/runner.go` (`runCommitCoordinator`)
+- `internal/core/ports.go` (`Sink`)
+
+## Diagrama de alto nivel
+
+```mermaid
+flowchart LR
+    A[Kafka / Redpanda] --> B[Stage 1: Capture]
+    B --> C[Partition Router]
+    C --> D[Stage 2: Assemble + Encode]
+    D --> E[Avro OCF Stream io.Pipe]
+    E --> F[Stage 3: Persist]
+    F --> G[MinIO / ADLS]
+    G --> H[Commit Coordinator]
+    H --> I[Kafka Offset Commit]
 ```
 
-## Configuracao
+## Diagrama de commit safety
 
-Veja o exemplo em [configs/orders.example.yaml](configs/orders.example.yaml).
-Para teste local com MinIO, veja [configs/orders.minio.example.yaml](configs/orders.minio.example.yaml).
-Para ambiente local de integracao, veja [deploy/docker-compose.local.yml](deploy/docker-compose.local.yml).
-Ao subir o ambiente local, o Redpanda Console fica em `http://localhost:8080` e o MinIO Console em `http://localhost:9001`.
+```mermaid
+sequenceDiagram
+    participant S as Source
+    participant W as Partition Worker
+    participant K as Sink
+    participant C as Commit Coordinator
 
-## Recomendacao De Formato
-
-- `avro` e o formato operacional padrao da landing raw
-- o runtime foi simplificado para um unico write path, com foco em throughput, menor RSS e menor pressao de GC
-- a Bronze/Delta deve ser materializada em uma etapa posterior, fora deste runtime
-
-Os knobs principais de throughput ficam em `runtime`:
-
-- `max_parallel_flushes`: numero maximo de batches em voo entre fechamento da janela, upload e commit
-- `max_parallel_encodes`: limite de concorrencia da etapa de encode local no caminho quente
-- `max_parallel_uploads`: paralelismo da etapa de envio ao sink
-- `flush_queue_size`: buffer entre fechamento da janela e upload
-- `partition_queue_size`: buffer de entrada por particao antes de aplicar backpressure
-- `execution_mode`: `auto|finite|continuous`
-- `autotune_mode`: `auto|off`
-- `autotune_interval`: janela de decisao do autotune em runtime
-- `autotune_max_workers`: teto dinamico para `flush/encode/upload` durante exploracao
-- `autotune_poll_max`: teto dinamico para `poll_records` em runtime
-- `drain_idle_poll_count`: limite de polls ociosos para encerrar run finito apos drenar backlog
-
-Auto-tuning operacional:
-
-- quando `poll_records`, `fetch_*`, `max_parallel_*`, `flush_queue_size` ou `partition_queue_size` estao em `0`, o runtime aplica defaults automaticos com base no perfil da maquina (CPU/RAM)
-- `execution_mode: auto` resolve para `finite` quando `run_timeout > 0` e para `continuous` quando `run_timeout = 0`
-- `autotune_mode: auto` ativa controle adaptativo em duas fases:
-  - fase source: ajusta `poll_records` efetivo
-  - fase workers: explora `flush/encode/upload` com rollback automatico
-- o teto de workers tambem e ajustado dinamicamente pelo numero de particoes ativas observadas na origem (ate `autotune_max_workers`)
-- se um valor for informado explicitamente no YAML, ele sempre prevalece
-
-Para maquina local pequena, como 8 GB de RAM e SSD compartilhado com Redpanda e MinIO, o ponto operacional inicial recomendado e:
-
-```yaml
-runtime:
-  max_parallel_flushes: 2
-  max_parallel_encodes: 2
-  max_parallel_uploads: 2
+    S->>W: Poll(particao, offsets)
+    W->>K: UploadWindowStream(window, reader)
+    K-->>W: upload ok (file path)
+    W->>C: uploadedTask(partition, sequence, end_offset)
+    C->>C: ordena por sequence / coalesce contiguo
+    C->>S: Commit(end_offset + 1)
+    Note over C,S: Se upload falhar, commit nao acontece
 ```
 
-Compressao:
+## Mapa dos modulos
 
-- `null`: default operacional do conector para landing raw, priorizando menor custo de CPU no caminho quente
-- `snappy`: opcao para cenarios onde o payload tenha compressibilidade real e o gargalo principal seja I/O
+- `cmd/landing-connector`: entrypoint, signal handling, timeout e pprof
+- `internal/config`: parser YAML, defaults, validacao e host profile auto defaults
+- `internal/core`: portas (`Source`, `Sink`) e factories
+- `internal/adapters/source/kafka`: consumo e commit Kafka
+- `internal/adapters/sink/*`: persistencia em MinIO/ADLS + path deterministico
+- `internal/batch`: montagem da janela e metadados de flush
+- `internal/app`: orchestrator do runtime, concorrencia, autotune e commit coordinator
+- `internal/model`: contratos tecnicos (`KafkaMessage`, `LandingRecord`, `BatchWindow`)
 
-Kafka:
+## Como o runtime executa
 
-- `kafka.poll_records`: quantidade maxima de registros drenados por chamada de poll
-- `kafka.fetch_max_bytes`, `kafka.fetch_max_partition_bytes`, `kafka.fetch_min_bytes`, `kafka.fetch_max_wait`: knobs opcionais para ajustar fetch sem mudar a semantica de commit
-- usar `0` nesses campos habilita auto-tuning do perfil da maquina
+1. carrega config e aplica defaults auto-tuned quando campos estao em `0`
+2. inicializa source e sink via factory
+3. inicia loop de poll e roteia mensagens por particao
+4. cada worker de particao escreve Avro incremental em stream
+5. ao fechar janela, dispara upload streaming
+6. commit coordinator recebe lotes persistidos e comita em ordem
+7. ao encerrar, emite runtime stats (heap/gc/alloc rate)
 
-Upload:
+## Autotune atual (estado do motor)
 
-- o conector nao materializa arquivo temporario local antes do upload
-- o commit continua acontecendo somente apos upload concluido com sucesso
-- logs por batch incluem metricas separadas de upload:
-  - `upload_stream_open_duration`
-  - `upload_active_duration`
-  - `upload_wait_for_first_byte`
-  - `upload_tail_finalize_duration`
+O runtime possui dois niveis de ajuste:
 
-## Arquitetura
+- bootstrap por host profile (CPU/RAM):
+  - `poll_records`, `fetch_*`, paralelismo inicial e tamanhos de fila
+- controle em runtime (`autotune_mode: auto`):
+  - ajusta `poll_limit` por janela
+  - aplica guardrails de memoria/GC
+  - teto dinamico de workers limitado por particoes ativas observadas e `autotune_max_workers`
 
-As decisoes arquiteturais ficam documentadas em [docs/architecture/README.md](docs/architecture/README.md).
-O baseline mais recente de performance fica em [docs/architecture/performance-analysis.md](docs/architecture/performance-analysis.md).
-O plano de implementacao das otimizacoes fica em [docs/architecture/implementation-plan-performance.md](docs/architecture/implementation-plan-performance.md).
-Para rodar comparativos locais do write path Avro, use [scripts/bench/run-local-compression-matrix.sh](scripts/bench/run-local-compression-matrix.sh) e [scripts/bench/run-avro-e2e-matrix.sh](scripts/bench/run-avro-e2e-matrix.sh).
+Knobs centrais em `runtime`:
+
+- `max_parallel_flushes`
+- `max_parallel_encodes`
+- `max_parallel_uploads`
+- `flush_queue_size`
+- `partition_queue_size`
+- `execution_mode` (`auto|finite|continuous`)
+- `autotune_mode` (`auto|off`)
+- `autotune_interval`
+- `autotune_max_workers`
+- `autotune_poll_max`
+- `drain_idle_poll_count`
+- `idle_poll_timeout`
+
+## Configuracao de referencia
+
+Arquivos exemplo:
+
+- [configs/orders.minio.example.yaml](configs/orders.minio.example.yaml)
+- [configs/orders.example.yaml](configs/orders.example.yaml)
+
+Pontos importantes:
+
+- `kafka.commit_interval` deve ser `0s` (commit manual seguro do runtime)
+- `output.format` atual suportado: `avro`
+- `output.compression` suportado: `null|snappy|deflate`
+- `multipart_part_size_mib` controla comportamento de upload no MinIO streaming
+
+## Execucao local
+
+Subir stack local:
+
+- [deploy/docker-compose.local.yml](deploy/docker-compose.local.yml)
+- Redpanda Console: `http://localhost:8080`
+- MinIO Console: `http://localhost:9001`
+
+Rodar runtime:
+
+```bash
+go run ./cmd/landing-connector -config ./configs/orders.minio.example.yaml
+```
+
+## Observabilidade
+
+Logs por batch incluem:
+
+- throughput e tamanho (`records`, `approx_input_bytes`, `stream_size`)
+- tempos (`encode_duration`, `upload_duration`, `upload_active_duration`, `time_to_commit`)
+- sinais de gargalo (`upload_wait_for_first_byte`, `upload_tail_finalize_duration`)
+- memoria/gc (`heap_alloc_bytes`, `heap_sys_bytes`, `gc_cycles`, `gc_pause_total_ns`)
+
+Ao final do run:
+
+- `runtime stats` com alloc rate, heap, goroutines e delta de GC
+
+## O que o runtime NAO faz
+
+- nao transforma para Bronze/Delta
+- nao parseia payload semanticamente
+- nao deduplica
+- nao implementa semantica de upsert
+
+## Documentacao complementar
+
+- [docs/architecture/README.md](docs/architecture/README.md)
+- [docs/architecture/current-connector-flow.md](docs/architecture/current-connector-flow.md)
+- [docs/architecture/performance-analysis.md](docs/architecture/performance-analysis.md)
+- [docs/architecture/performance-deep-dive-2026-04-28.md](docs/architecture/performance-deep-dive-2026-04-28.md)
+- [scripts/bench/run-local-compression-matrix.sh](scripts/bench/run-local-compression-matrix.sh)
+- [scripts/bench/run-avro-e2e-matrix.sh](scripts/bench/run-avro-e2e-matrix.sh)
